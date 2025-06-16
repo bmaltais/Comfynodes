@@ -17,16 +17,16 @@ class ClearGpuMemoryCache:
             "required": {
                 # This input is a placeholder to ensure the node executes
                 # when the workflow reaches this point.
-                "trigger": ("*",),
-            },
+                "any_type": ("*",)
+            }
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("*",)
     FUNCTION = "clear_cache"
     OUTPUT_NODE = True
     CATEGORY = "Utilities/Memory"
 
-    def clear_cache(self, trigger):
+    def clear_cache(self, any_type):
         """
         This function is executed when the node is triggered.
         It clears the CUDA cache to free up GPU memory.
@@ -36,14 +36,5 @@ class ClearGpuMemoryCache:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
         gc.collect()
-        return ()
+        return (any_type,)
 
-# A dictionary that allows ComfyUI to discover the nodes in this file.
-# NODE_CLASS_MAPPINGS = {
-#    "ClearGpuMemoryCache": ClearGpuMemoryCache
-# }
-
-# A dictionary that allows ComfyUI to display human-readable names for the nodes.
-# NODE_DISPLAY_NAME_MAPPINGS = {
-#    "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache"
-# }
