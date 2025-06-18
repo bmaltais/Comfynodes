@@ -45,7 +45,7 @@ class LatentByMegapixelsAndAspectRatio:
             }
         }
 
-    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "INT")
+    RETURN_TYPES = ("LATENT", "WIDTH", "HEIGHT", "TARGET_WIDTH", "TARGET_HEIGHT")
     FUNCTION = "generate"
     CATEGORY = "latent"
     DESCRIPTION = "Generates an empty latent image with a specific total megapixel count and aspect ratio."
