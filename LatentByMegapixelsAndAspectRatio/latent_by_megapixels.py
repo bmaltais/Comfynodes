@@ -40,17 +40,18 @@ class LatentByMegapixelsAndAspectRatio:
                 "target_megapixels": ("FLOAT", {"default": 1.0, "min": 0.0625, "max": (INPUT_MAX_RESOLUTION*INPUT_MAX_RESOLUTION)/(1024*1024), "step": 0.1, "tooltip": "Total desired megapixels (e.g., 1.0 for a 1MP image like 1024x1024, 0.25 for 512x512)."}),
                 "aspect_ratio_width": ("INT", {"default": 1, "min": 1, "max": INPUT_MAX_RESOLUTION, "step": 1, "tooltip": "Width component of the aspect ratio (e.g., 16 for 16:9)."}),
                 "aspect_ratio_height": ("INT", {"default": 1, "min": 1, "max": INPUT_MAX_RESOLUTION, "step": 1, "tooltip": "Height component of the aspect ratio (e.g., 9 for 16:9)."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."})
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."}),
+                "target_multiplier": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1, "tooltip": "Multiplier for the target width and height. The original latent dimensions remain based on megapixels and aspect ratio."})
             }
         }
 
-    RETURN_TYPES = ("LATENT",)
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "INT")
     FUNCTION = "generate"
     CATEGORY = "latent"
     DESCRIPTION = "Generates an empty latent image with a specific total megapixel count and aspect ratio."
-    OUTPUT_TOOLTIPS = ("The empty latent image batch, scaled to the target megapixels and aspect ratio.",)
+    OUTPUT_TOOLTIPS = ("The empty latent image batch (based on original megapixels and aspect ratio).", "Original calculated width (pixels).", "Original calculated height (pixels).", "Target width (pixels, original width * multiplier, rounded to 8).", "Target height (pixels, original height * multiplier, rounded to 8).")
 
-    def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1):
+    def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1, target_multiplier=1.0):
         # Ensure aspect ratio components are positive
         if aspect_ratio_width <= 0:
             aspect_ratio_width = 1
@@ -116,17 +117,33 @@ class LatentByMegapixelsAndAspectRatio:
         width = min(width, MAX_RESOLUTION)
         height = min(height, MAX_RESOLUTION)
 
+        # These 'width' and 'height' are the final base dimensions for latent generation and original output
+        # Calculate target dimensions based on the multiplier
+        target_raw_width = width * target_multiplier
+        target_raw_height = height * target_multiplier
 
-        actual_pixels = width * height
+        # min_pixel_dim is defined earlier in the function (e.g., 16)
+        # Ensure target dimensions are multiples of 8 and respect min_pixel_dim
+        target_width = max(min_pixel_dim, round(target_raw_width / 8.0) * 8)
+        target_height = max(min_pixel_dim, round(target_raw_height / 8.0) * 8)
+
+        # Cap target dimensions by MAX_RESOLUTION
+        target_width = min(target_width, MAX_RESOLUTION)
+        target_height = min(target_height, MAX_RESOLUTION)
+
+        actual_pixels = width * height # Based on original width/height for the latent
         actual_megapixels = actual_pixels / (1024*1024)
 
         print(f"LatentByMegapixels: Requested {target_megapixels:.2f}MP ({aspect_ratio_width}:{aspect_ratio_height}).")
         print(f"LatentByMegapixels: Initial calculated dimensions: {initial_width:.0f}x{initial_height:.0f}.")
-        print(f"LatentByMegapixels: Adjusted to multiples of 8: {width}x{height}.")
-        print(f"LatentByMegapixels: Final dimensions after MAX_RESOLUTION ({MAX_RESOLUTION}) and min_dim ({min_pixel_dim}) constraints: {width}x{height}.")
-        print(f"LatentByMegapixels: Resulting actual megapixels: {actual_megapixels:.3f}MP.")
+        print(f"LatentByMegapixels: Adjusted to multiples of 8 (base for latent): {width}x{height}.")
+        print(f"LatentByMegapixels: Final base dimensions after MAX_RESOLUTION ({MAX_RESOLUTION}) and min_dim ({min_pixel_dim}) constraints: {width}x{height}.")
+        print(f"LatentByMegapixels: Resulting actual megapixels for latent: {actual_megapixels:.3f}MP.")
+        print(f"LatentByMegapixels: Target multiplier: {target_multiplier:.2f}x.")
+        print(f"LatentByMegapixels: Calculated raw target dimensions (width*multiplier, height*multiplier): {width * target_multiplier:.0f}x{height * target_multiplier:.0f}.")
+        print(f"LatentByMegapixels: Final target dimensions (multiple of 8, min_dim {min_pixel_dim}, capped at {MAX_RESOLUTION}): {target_width}x{target_height}.")
 
-        # Latent dimensions are pixel dimensions divided by 8
+        # Latent dimensions are pixel dimensions divided by 8 (using original width/height)
         latent_width = width // 8
         latent_height = height // 8
 
@@ -143,7 +160,7 @@ class LatentByMegapixelsAndAspectRatio:
 
         latent = torch.zeros([batch_size, 4, latent_height, latent_width], device=self.device)
 
-        return ({"samples": latent, "ui": {"text": f"{width}x{height} ({actual_megapixels:.2f}MP)"}}, )
+        return ({"samples": latent, "ui": {"text": f"{width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"}}, width, height, target_width, target_height)
 
 # This is needed for ComfyUI to recognize the node
 NODE_CLASS_MAPPINGS = {
