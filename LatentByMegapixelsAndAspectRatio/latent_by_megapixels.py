@@ -38,8 +38,7 @@ class LatentByMegapixelsAndAspectRatio:
         return {
             "required": {
                 "target_megapixels": ("FLOAT", {"default": 1.0, "min": 0.0625, "max": (INPUT_MAX_RESOLUTION*INPUT_MAX_RESOLUTION)/(1024*1024), "step": 0.1, "tooltip": "Total desired megapixels (e.g., 1.0 for a 1MP image like 1024x1024, 0.25 for 512x512)."}),
-                "aspect_ratio_width": ("INT", {"default": 1, "min": 1, "max": INPUT_MAX_RESOLUTION, "step": 1, "tooltip": "Width component of the aspect ratio (e.g., 16 for 16:9)."}),
-                "aspect_ratio_height": ("INT", {"default": 1, "min": 1, "max": INPUT_MAX_RESOLUTION, "step": 1, "tooltip": "Height component of the aspect ratio (e.g., 9 for 16:9)."}),
+                "aspect_ratio_string": ("STRING", {"default": "16:9", "tooltip": "Aspect ratio as a string, e.g., '16:9', '4:3', '1:1'."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."}),
                 "target_multiplier": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1, "tooltip": "Multiplier for the target width and height. The original latent dimensions remain based on megapixels and aspect ratio."})
             }
@@ -52,8 +51,23 @@ class LatentByMegapixelsAndAspectRatio:
     DESCRIPTION = "Generates an empty latent image with a specific total megapixel count and aspect ratio."
     OUTPUT_TOOLTIPS = ("The empty latent image batch (based on original megapixels and aspect ratio).", "Original calculated width (pixels).", "Original calculated height (pixels).", "Target width (pixels, original width * multiplier, rounded to 8).", "Target height (pixels, original height * multiplier, rounded to 8).")
 
-    def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1, target_multiplier=1.0):
-        # Ensure aspect ratio components are positive
+    def generate(self, target_megapixels, aspect_ratio_string, batch_size=1, target_multiplier=1.0):
+        try:
+            if not aspect_ratio_string or not aspect_ratio_string.strip():
+                raise ValueError("Aspect ratio string is empty.")
+            parts = aspect_ratio_string.split(':')
+            if len(parts) != 2:
+                raise ValueError("Aspect ratio string must be in 'width:height' format.")
+            aspect_ratio_width = int(parts[0])
+            aspect_ratio_height = int(parts[1])
+            if aspect_ratio_width <= 0 or aspect_ratio_height <= 0:
+                raise ValueError("Aspect ratio components must be positive.")
+        except ValueError as e:
+            print(f"Warning: Invalid aspect_ratio_string '{aspect_ratio_string}', using 1:1 default. Error: {e}")
+            aspect_ratio_width = 1
+            aspect_ratio_height = 1
+
+        # Ensure aspect ratio components are positive (redundant if ValueError caught above, but good for safety)
         if aspect_ratio_width <= 0:
             aspect_ratio_width = 1
         if aspect_ratio_height <= 0:
@@ -135,7 +149,7 @@ class LatentByMegapixelsAndAspectRatio:
         actual_pixels = width * height # Based on original width/height for the latent
         actual_megapixels = actual_pixels / (1024*1024)
 
-        print(f"LatentByMegapixels: Requested {target_megapixels:.2f}MP ({aspect_ratio_width}:{aspect_ratio_height}).")
+        print(f"LatentByMegapixels: Requested {target_megapixels:.2f}MP, aspect '{aspect_ratio_string}'. Using parsed {aspect_ratio_width}:{aspect_ratio_height}.")
         print(f"LatentByMegapixels: Initial calculated dimensions: {initial_width:.0f}x{initial_height:.0f}.")
         print(f"LatentByMegapixels: Adjusted to multiples of 8 (base for latent): {width}x{height}.")
         print(f"LatentByMegapixels: Final base dimensions after MAX_RESOLUTION ({MAX_RESOLUTION}) and min_dim ({min_pixel_dim}) constraints: {width}x{height}.")
@@ -161,7 +175,7 @@ class LatentByMegapixelsAndAspectRatio:
 
         latent = torch.zeros([batch_size, 4, latent_height, latent_width], device=self.device)
 
-        return ({"samples": latent, "ui": {"text": f"{width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"}}, width, height, target_width, target_height)
+        return ({"samples": latent, "ui": {"text": f"{aspect_ratio_string} -> {width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"}}, width, height, target_width, target_height)
 
 # This is needed for ComfyUI to recognize the node
 NODE_CLASS_MAPPINGS = {
