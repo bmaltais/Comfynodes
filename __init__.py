@@ -23,15 +23,25 @@ except ImportError:
     LatentByMegapixelsAndAspectRatio_class_mappings = {}
     LatentByMegapixelsAndAspectRatio_display_mappings = {}
 
+# Import mappings from ImageAspectRatioString
+try:
+    from .ImageAspectRatioString import NODE_CLASS_MAPPINGS as ImageAspectRatioString_class_mappings, NODE_DISPLAY_NAME_MAPPINGS as ImageAspectRatioString_display_mappings
+except ImportError:
+    print("[WARN] ImageAspectRatioString not found. Skipping.")
+    ImageAspectRatioString_class_mappings = {}
+    ImageAspectRatioString_display_mappings = {}
+
 # Aggregate mappings
 NODE_CLASS_MAPPINGS = {}
 NODE_CLASS_MAPPINGS.update(AnalogFilmNoise_class_mappings)
 NODE_CLASS_MAPPINGS.update(ClearGpuMemoryCache_class_mappings)
 NODE_CLASS_MAPPINGS.update(LatentByMegapixelsAndAspectRatio_class_mappings)
+NODE_CLASS_MAPPINGS.update(ImageAspectRatioString_class_mappings)
 
 NODE_DISPLAY_NAME_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS.update(AnalogFilmNoise_display_mappings)
 NODE_DISPLAY_NAME_MAPPINGS.update(ClearGpuMemoryCache_display_mappings)
 NODE_DISPLAY_NAME_MAPPINGS.update(LatentByMegapixelsAndAspectRatio_display_mappings)
+NODE_DISPLAY_NAME_MAPPINGS.update(ImageAspectRatioString_display_mappings)
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
