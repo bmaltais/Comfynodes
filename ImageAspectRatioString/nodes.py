@@ -21,4 +21,4 @@ class ImageAspectRatioString:
     def get_aspect_ratio(self, image: torch.Tensor):
         batch_size, height, width, num_channels = image.shape
         aspect_ratio = width / height
-        return (f"{width}:{height} ({aspect_ratio:.2f})",)
+        return (f"{aspect_ratio:.2f}",)
