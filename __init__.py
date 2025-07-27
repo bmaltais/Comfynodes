@@ -25,9 +25,9 @@ except ImportError:
 
 # Import mappings from upscale-by-model-to-total-pixels
 try:
-    from .upscale-by-model-to-total-pixels import NODE_CLASS_MAPPINGS as UpscaleImageToTotalPixels_class_mappings, NODE_DISPLAY_NAME_MAPPINGS as UpscaleImageToTotalPixels_display_mappings
+    from .UpscaleByModelToTotalPixels import NODE_CLASS_MAPPINGS as UpscaleImageToTotalPixels_class_mappings, NODE_DISPLAY_NAME_MAPPINGS as UpscaleImageToTotalPixels_display_mappings
 except ImportError:
-    print("[WARN] upscale-by-model-to-total-pixels not found. Skipping.")
+    print("[WARN] UpscaleByModelToTotalPixels not found. Skipping.")
     UpscaleImageToTotalPixels_class_mappings = {}
     UpscaleImageToTotalPixels_display_mappings = {}
 
