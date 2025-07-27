@@ -1,16 +1,16 @@
 """
-@author: Trần Nam Tuấn
-@title: Upscale Image By (Using Model)
-@nickname: Upscale Image By (Using Model)
-@description: This custom node allow upscaling an image by a factor using a model.
+@author: ominiman
+@title: Upscale Image To Total Pixels
+@nickname: Upscale Image To Total Pixels
+@description: This custom node allow upscaling an image to a desired total pixel count.
 """
 
-from .nodes import *
+from .nodes import UpscaleImageToTotalPixels
 
 NODE_CLASS_MAPPINGS = {
-    "UpscaleImageByUsingModel": UpscaleImageByUsingModel
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "UpscaleImageByUsingModel": "Upscale Image By (Using Model)"
+    "UpscaleImageToTotalPixels": "Upscale Image To Total Pixels"
 }
