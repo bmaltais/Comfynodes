@@ -1,6 +1,11 @@
-# ComfyUI/custom_nodes/ClearGpuMemoryCacheNode/__init__.py
+"""
+@author: ominiman
+@title: Clear GPU Memory Cache
+@nickname: Clear GPU Memory Cache
+@description: This node provides a button to clear the GPU's memory cache (VRAM).
+"""
 
-from .clear_gpu_memory_cache_node import ClearGpuMemoryCache
+from .nodes import ClearGpuMemoryCache
 
 NODE_CLASS_MAPPINGS = {
     "ClearGpuMemoryCache": ClearGpuMemoryCache
@@ -9,7 +14,3 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache"
 }
-
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
-
-print("### Loading: ComfyUI-ClearGpuMemoryCacheNode ###")
