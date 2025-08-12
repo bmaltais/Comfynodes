@@ -70,19 +70,18 @@ class ImageMergeNode:
             src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
             dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
 
-            # Calculate the median translation vector, which is robust to outliers
-            translations = src_pts - dst_pts
-            dx = np.median(translations[:, 0])
-            dy = np.median(translations[:, 1])
+            # Estimate the affine transformation matrix, which is robust to outliers
+            M, mask = cv2.estimateAffine2D(dst_pts, src_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
 
-            # Create the transformation matrix for translation
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            if M is None:
+                print("ImageMergeNode: Could not compute affine transformation. Skipping alignment.")
+                return updated_cv2
 
-            # Apply the translation to the updated image
+            # Apply the affine transformation to the updated image
             h, w = original_cv2.shape[:2]
             aligned_updated_cv2 = cv2.warpAffine(updated_cv2, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
 
-            print(f"ImageMergeNode: Aligned image with translation (dx: {dx:.2f}, dy: {dy:.2f})")
+            print(f"ImageMergeNode: Aligned image with affine transformation.")
             return aligned_updated_cv2
 
         except Exception as e:
