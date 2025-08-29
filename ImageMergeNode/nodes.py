@@ -105,55 +105,78 @@ class ImageMergeNode:
 
                 print(f"ImageMergeNode: Found {len(original_landmarks_list)} face(s) in original and {len(updated_landmarks_list)} in updated.")
 
-                warped_image = updated_cv2.copy()
+                final_image = updated_cv2.copy()
 
-                # Match faces based on proximity of bounding box centers
+                # Use a comprehensive set of landmarks for detailed warping
+                key_landmarks_indices = list(itertools.chain(
+                    *mp.solutions.face_mesh.FACEMESH_LIPS,
+                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYE,
+                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYEBROW,
+                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYE,
+                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYEBROW,
+                    *mp.solutions.face_mesh.FACEMESH_FACE_OVAL,
+                ))
+                if hasattr(mp.solutions.face_mesh, 'FACEMESH_NOSE'):
+                    key_landmarks_indices += list(itertools.chain(*mp.solutions.face_mesh.FACEMESH_NOSE))
+
+                key_landmarks_indices = sorted(list(set(key_landmarks_indices)))
+
+                # Match faces based on proximity
                 for i, updated_landmarks in enumerate(updated_landmarks_list):
-                    # Find the closest face in the original image
                     updated_center = updated_landmarks.mean(axis=0)
                     distances = [np.linalg.norm(updated_center - orig.mean(axis=0)) for orig in original_landmarks_list]
                     best_match_idx = np.argmin(distances)
                     original_landmarks = original_landmarks_list[best_match_idx]
 
-                    print(f"ImageMergeNode: Warping face {i+1} in updated image to match face {best_match_idx+1} in original.")
+                    print(f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original.")
 
-                    # Use a subset of landmarks for more stable warping (e.g., facial outline, eyes, nose, mouth)
-                    # These indices are standard across MediaPipe's 468 landmarks
-                    key_landmarks_indices = [
-                        33, 263, 61, 291, 199, # Face outline
-                        362, 385, 387, 263, 373, 380, # Left eye
-                        133, 158, 160, 33, 144, 153, # Right eye
-                        1, 2, 98, 327, # Nose
-                        61, 84, 17, 314, 291, 405, 18, 178 # Mouth
-                    ]
-
-                    # Ensure all key landmarks are within the detected landmarks
-                    if original_landmarks.shape[0] < max(key_landmarks_indices) + 1:
-                         print("ImageMergeNode: Not enough landmarks detected for stable warping. Using all available.")
-                         source_pts = original_landmarks
-                         target_pts = updated_landmarks
+                    # Ensure we have enough landmarks for the detailed set
+                    if original_landmarks.shape[0] < max(key_landmarks_indices) + 1 or \
+                       updated_landmarks.shape[0] < max(key_landmarks_indices) + 1:
+                        print("ImageMergeNode: Not enough landmarks for detailed warping. Using all available.")
+                        source_pts = original_landmarks
+                        target_pts = updated_landmarks
                     else:
                         source_pts = np.array([original_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
                         target_pts = np.array([updated_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
 
-                    # Use Thin Plate Spline for warping
                     tps = cv2.createThinPlateSplineShapeTransformer()
+                    source_pts_reshaped = source_pts.reshape(1, -1, 2)
+                    target_pts_reshaped = target_pts.reshape(1, -1, 2)
+                    matches = [cv2.DMatch(i, i, 0) for i in range(len(source_pts))]
+                    tps.estimateTransformation(target_pts_reshaped, source_pts_reshaped, matches)
 
-                    source_pts_list = [[pt[0], pt[1]] for pt in source_pts]
-                    target_pts_list = [[pt[0], pt[1]] for pt in target_pts]
+                    warped_updated_cv2 = tps.warpImage(updated_cv2)
 
-                    matches = [cv2.DMatch(i, i, 0) for i in range(len(source_pts_list))]
+                    # Create a mask for the face in the original image to blend
+                    hull_indices = cv2.convexHull(original_landmarks, returnPoints=False)
+                    hull_points = np.array([original_landmarks[i[0]] for i in hull_indices], dtype=np.int32)
 
-                    tps.estimateTransformation(np.array([target_pts_list]), np.array([source_pts_list]), matches)
-                    warped_image = tps.warpImage(warped_image)
+                    mask = np.zeros(original_cv2.shape[:2], dtype=np.uint8)
+                    cv2.fillConvexPoly(mask, hull_points, 255)
 
-                return warped_image
+                    # Dilate mask for smoother blending
+                    kernel = np.ones((10, 10), np.uint8)
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+
+                    r = cv2.boundingRect(hull_points)
+                    center = (r[0] + r[2] // 2, r[1] + r[3] // 2)
+
+                    final_image = self._seamless_clone(warped_updated_cv2, final_image, mask, center)
+
+                return final_image
 
         except Exception as e:
             print(f"ImageMergeNode: Error during facial correction: {e}. Skipping correction.")
             return updated_cv2
 
-        return updated_cv2
+    def _seamless_clone(self, src, dst, mask, center):
+        """Performs seamless cloning to blend the warped face."""
+        try:
+            return cv2.seamlessClone(src, dst, mask, center, cv2.NORMAL_CLONE)
+        except Exception as e:
+            print(f"ImageMergeNode: Error during seamless cloning: {e}. Returning destination image.")
+            return dst
 
     def _blend_images(self, base_img: np.ndarray, blend_img: np.ndarray, mode: str) -> np.ndarray:
         """Applies a blending mode to two images."""
