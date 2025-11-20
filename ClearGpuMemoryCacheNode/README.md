@@ -1,26 +1,20 @@
-# Clear GPU Memory Cache Node for ComfyUI
+# ClearGpuMemoryCacheNode for ComfyUI
 
-This custom node provides a simple way to clear the GPU memory cache within ComfyUI. This can be useful for freeing up GPU memory and potentially resolving out-of-memory errors.
+The `ClearGpuMemoryCacheNode` is a custom node for ComfyUI that clears the GPU memory cache. This can be useful for freeing up GPU memory and potentially resolving out-of-memory errors in complex workflows.
 
 ## Features
 
-- Simple boolean trigger to clear the cache.
-- Prints a message to the console indicating whether the cache was cleared or if CUDA was not available.
-
-## Installation
-
-1. Clone or download this repository.
-2. Place the `ClearGpuMemoryCacheNode` directory into your `ComfyUI/custom_nodes/` directory.
-3. Restart ComfyUI.
+-   **Trigger**: The node is triggered by any input, allowing it to be placed anywhere in a workflow.
+-   **Passthrough**: The node passes through any data it receives, so it can be inserted into a workflow without disrupting the data flow.
 
 ## Usage
 
-1. Add the "Clear GPU Memory Cache" node to your workflow.
-2. Connect the `clear_cache_trigger` input to a boolean value (e.g., a primitive boolean node).
-3. When the `clear_cache_trigger` is set to `True`, the node will attempt to clear the GPU memory cache.
+1.  **Add the Node**: Add the `ClearGpuMemoryCacheNode` to your ComfyUI workflow.
+2.  **Connect Inputs**: Connect any output to the `any_type` input of the node to trigger it.
+3.  **Run the Workflow**: When the workflow reaches the node, it will clear the GPU memory cache and then pass the input data to any connected output.
 
-## Notes
+## Installation
 
-- This node relies on `torch.cuda.empty_cache()` to clear the cache.
-- Clearing the cache may not always resolve out-of-memory errors, as memory fragmentation can also be a factor.
-- Use this node judiciously, as frequent cache clearing may impact performance.
+1.  Clone or download this repository.
+2.  Place the `ClearGpuMemoryCacheNode` directory into your `ComfyUI/custom_nodes/` directory.
+3.  Restart ComfyUI.

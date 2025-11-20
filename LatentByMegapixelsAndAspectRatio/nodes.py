@@ -12,6 +12,11 @@ class LatentByMegapixelsAndAspectRatio:
     """
     Generates an empty latent image with dimensions calculated based on a target
     megapixel count and a specific aspect ratio.
+
+    This node is useful for creating latent spaces with precise dimensions that
+    are not necessarily standard resolutions, but adhere to a desired total pixel
+    count and aspect ratio. It ensures the final dimensions are divisible by 8
+    and within the maximum resolution limits.
     """
     def __init__(self):
         self.device = comfy.model_management.intermediate_device()
@@ -19,7 +24,11 @@ class LatentByMegapixelsAndAspectRatio:
     @classmethod
     def INPUT_TYPES(s):
         """
-        Defines the input types for the node.
+        Defines the input types for the node, including the target megapixels,
+        aspect ratio, and batch size.
+
+        Returns:
+            dict: A dictionary specifying the required input types for the node.
         """
         return {
             "required": {
@@ -38,18 +47,24 @@ class LatentByMegapixelsAndAspectRatio:
 
     def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1, target_multiplier=1.0):
         """
-        Calculates dimensions from megapixels and aspect ratio, then creates an empty latent.
+        Calculates the dimensions from the target megapixels and aspect ratio,
+        and then creates an empty latent tensor with those dimensions.
+
+        The method ensures that the final dimensions are divisible by 8 and do not
+        exceed the maximum resolution allowed. It also calculates target dimensions
+        based on a multiplier, which can be used for upscaling or other purposes.
 
         Args:
-            target_megapixels (float): The desired total megapixels (e.g., 1.0 for 1024x1024).
-            aspect_ratio_width (int): The width component of the aspect ratio.
-            aspect_ratio_height (int): The height component of the aspect ratio.
-            batch_size (int): The number of latent images to generate.
-            target_multiplier (float): A multiplier to calculate target dimensions for other uses.
+            target_megapixels (float): The desired total megapixels (e.g., 1.0 for a 1024x1024 image).
+            aspect_ratio_width (int): The width component of the desired aspect ratio.
+            aspect_ratio_height (int): The height component of the desired aspect ratio.
+            batch_size (int): The number of latent images to generate in the batch.
+            target_multiplier (float): A multiplier to calculate target dimensions, which can be
+                                       used for subsequent upscaling steps.
 
         Returns:
-            (dict, int, int, int, int): A tuple containing the latent tensor, base width,
-            base height, target width, and target height.
+            (dict, int, int, int, int): A tuple containing the latent tensor, the calculated
+            base width and height, and the target width and height.
         """
         # Calculate total pixels from megapixels
         target_total_pixels = target_megapixels * 1024 * 1024

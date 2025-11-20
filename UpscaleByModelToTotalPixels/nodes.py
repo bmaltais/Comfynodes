@@ -3,8 +3,14 @@ from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 
 class UpscaleImageToTotalPixels:
     """
-    Upscales an image to a target total pixel count using an upscaling model.
-    If the image is already larger than the target, it's downscaled.
+    Upscales an image to a target total pixel count using an upscaling model,
+    with an optional final scaling adjustment to meet divisibility constraints.
+
+    This node first upscales an image using a provided model if the initial pixel
+    count is less than the target. It then calculates the final dimensions required
+    to meet the target megapixel count while preserving the aspect ratio. Finally,
+    it adjusts these dimensions to be divisible by a specified number, which can
+    help prevent artifacts in subsequent processing steps.
     """
     rescale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
      
@@ -18,7 +24,11 @@ class UpscaleImageToTotalPixels:
     @classmethod
     def INPUT_TYPES(self):
         """
-        Defines the input types for the node.
+        Defines the input types for the node, including the upscale model, image,
+        target megapixels, and scaling options.
+
+        Returns:
+            dict: A dictionary specifying the required input types for the node.
         """
         return {
             "required": {
@@ -33,15 +43,28 @@ class UpscaleImageToTotalPixels:
 
     def upscale(self, upscale_model, image, total_megapixels, rescale_method, skip_model_upscale, make_divisible_by):
         """
-        Performs the upscaling or downscaling with optional divisibility constraints.
+        Performs the upscaling or downscaling of an image to a target total pixel
+        count, with an optional final adjustment to make dimensions divisible
+        by a specified number.
+
+        The process involves three main steps:
+        1.  An initial upscale if the image is smaller than the target resolution.
+            This can be done with an upscaling model or a standard resampling method.
+        2.  Calculation of the final dimensions that meet the target megapixel count
+            while preserving the aspect ratio.
+        3.  An optional adjustment of these dimensions to ensure they are divisible
+            by `make_divisible_by`, which can improve compatibility with other
+            processing nodes.
 
         Args:
-            upscale_model: The upscaling model to use.
+            upscale_model: The upscaling model to use for the initial upscale.
             image (torch.Tensor): The input image tensor.
-            total_megapixels (float): The target total megapixels.
-            rescale_method (str): The resampling method for scaling.
-            skip_model_upscale (bool): If True, skips model-based upscaling.
-            make_divisible_by (int): Ensures final dimensions are divisible by this number.
+            total_megapixels (float): The target total megapixels for the output image.
+            rescale_method (str): The resampling method for any scaling operations.
+            skip_model_upscale (bool): If True, skips the model-based upscale and uses
+                                       standard resampling instead.
+            make_divisible_by (int): Ensures the final image dimensions are divisible
+                                     by this number.
 
         Returns:
             (torch.Tensor,): A tuple containing the rescaled image tensor.

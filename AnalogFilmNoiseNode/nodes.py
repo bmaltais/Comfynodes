@@ -3,8 +3,12 @@ import numpy as np
 
 class AnalogFilmNoiseNode:
     """
-    Applies analog film-style noise to an image. This effect simulates the grain
-    found in traditional photographic film.
+    Applies analog film-style noise to an image.
+
+    This node simulates the grain found in traditional photographic film, providing
+    controls for intensity, grain size, and monochrome appearance. The noise is
+    generated and applied on a per-channel basis, allowing for both color and
+    grayscale grain effects.
     """
     def __init__(self):
         pass
@@ -14,6 +18,9 @@ class AnalogFilmNoiseNode:
         """
         Defines the input types for the node, including the image, noise intensity,
         grain size, and monochrome option.
+
+        Returns:
+            dict: A dictionary specifying the required input types for the node.
         """
         return {
             "required": {
@@ -32,16 +39,23 @@ class AnalogFilmNoiseNode:
 
     def apply_film_noise(self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool):
         """
-        Adds film grain to the input image.
+        Adds film grain to the input image by generating a noise map and blending
+        it with the original image.
+
+        The noise is generated at a lower resolution determined by `grain_size`
+        and then upscaled to create a blocky, film-like grain. It can be applied
+        as either monochrome or color noise.
 
         Args:
             image (torch.Tensor): The input image tensor.
             intensity (float): The strength of the noise effect.
-            grain_size (float): The size of the noise grain. Larger values create coarser grain.
-            monochrome (bool): If True, applies grayscale noise; otherwise, applies color noise.
+            grain_size (float): The size of the noise grain. Larger values create
+                                coarser grain.
+            monochrome (bool): If True, applies grayscale noise; otherwise, applies
+                               color noise.
 
         Returns:
-            (torch.Tensor,): A tuple containing the image tensor with added noise.
+            (torch.Tensor,): A tuple containing the image tensor with added film noise.
         """
         if intensity == 0:
             return (image,)

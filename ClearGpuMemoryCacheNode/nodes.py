@@ -3,8 +3,12 @@ import gc
 
 class ClearGpuMemoryCache:
     """
-    A node to clear the GPU's memory cache, freeing up VRAM. It can be used
-    to manage memory in complex workflows.
+    A node to clear the GPU's memory cache, freeing up VRAM.
+
+    This node is designed to be used in complex workflows where GPU memory management
+    is critical. It calls `torch.cuda.empty_cache()` and `gc.collect()` to release
+    unreferenced memory back to the system, which can help prevent out-of-memory
+    errors.
     """
     def __init__(self):
         pass
@@ -12,7 +16,11 @@ class ClearGpuMemoryCache:
     @classmethod
     def INPUT_TYPES(s):
         """
-        Defines the input types for the node. It accepts any input as a trigger.
+        Defines the input types for the node. It accepts any input as a trigger
+        to ensure execution within the workflow.
+
+        Returns:
+            dict: A dictionary specifying the required input types for the node.
         """
         return {
             "required": {
@@ -32,11 +40,16 @@ class ClearGpuMemoryCache:
         """
         Clears the CUDA cache to free up GPU memory and performs garbage collection.
 
+        This method is the primary function of the node. It checks for CUDA availability
+        before attempting to clear the cache and also runs Python's garbage collector
+        to ensure a thorough cleanup.
+
         Args:
             any_type: Any data type, used as a trigger for execution and passed through.
 
         Returns:
-            (any,): A tuple containing the unmodified input data.
+            (any,): A tuple containing the unmodified input data, allowing the node to
+                    be inserted anywhere in a workflow without disrupting data flow.
         """
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

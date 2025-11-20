@@ -7,6 +7,12 @@ import itertools
 class ImageMergeNode:
     """
     A node to merge two images with optional alignment and various blending modes.
+
+    This node provides advanced capabilities for image composition, including feature-based
+    alignment to register images, facial landmark detection for precise facial correction,
+    and multiple blending modes to control how images are combined. It is designed
+    for workflows where one image (the 'updated' image) needs to be conformed
+    to a reference image (the 'original' image) before blending.
     """
 
     blend_modes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Color"]
@@ -14,7 +20,11 @@ class ImageMergeNode:
     @classmethod
     def INPUT_TYPES(cls):
         """
-        Defines the input types for the node.
+        Defines the input types for the node, including images, blending options,
+        and alignment settings.
+
+        Returns:
+            dict: A dictionary specifying the required input types for the node.
         """
         return {
             "required": {
@@ -32,17 +42,49 @@ class ImageMergeNode:
     CATEGORY = "image/layering"
 
     def _tensor_to_cv2(self, tensor: torch.Tensor) -> np.ndarray:
-        """Converts a torch tensor (B, H, W, C) to an OpenCV image (H, W, C, BGR)."""
+        """
+        Converts a torch tensor to an OpenCV image.
+
+        Args:
+            tensor (torch.Tensor): The input image tensor with shape (B, H, W, C)
+                                   and pixel values in the [0.0, 1.0] range.
+
+        Returns:
+            np.ndarray: The converted image in OpenCV format (H, W, C) with BGR color
+                        channels and pixel values in the [0, 255] range.
+        """
         np_image = tensor.squeeze(0).cpu().numpy()
         return cv2.cvtColor((np_image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
     def _cv2_to_tensor(self, np_image: np.ndarray) -> torch.Tensor:
-        """Converts an OpenCV image (H, W, C, BGR) back to a torch tensor (B, H, W, C)."""
+        """
+        Converts an OpenCV image back to a torch tensor.
+
+        Args:
+            np_image (np.ndarray): The input OpenCV image with BGR color channels.
+
+        Returns:
+            torch.Tensor: The converted image tensor with shape (1, H, W, C), RGB color
+                          channels, and pixel values normalized to [0.0, 1.0].
+        """
         np_image = cv2.cvtColor(np_image, cv2.COLOR_BGR2RGB)
         return torch.from_numpy(np_image.astype(np.float32) / 255.0).unsqueeze(0)
 
     def _align_images(self, original_cv2: np.ndarray, updated_cv2: np.ndarray) -> np.ndarray:
-        """Aligns the updated image to the original image using feature matching to find the translation."""
+        """
+        Aligns the updated image to the original image using feature matching.
+
+        This method detects keypoints and descriptors in both images, matches them,
+        and computes an affine transformation to warp the updated image, aligning it
+        with the original.
+
+        Args:
+            original_cv2 (np.ndarray): The reference image.
+            updated_cv2 (np.ndarray): The image to be aligned.
+
+        Returns:
+            np.ndarray: The aligned version of the updated image.
+        """
         try:
             orb = cv2.ORB_create(nfeatures=1500)
             kp1, des1 = orb.detectAndCompute(original_cv2, None)
@@ -81,7 +123,17 @@ class ImageMergeNode:
             return updated_cv2
 
     def _get_facial_landmarks(self, image_cv2, face_mesh):
-        """Detects facial landmarks in a single image."""
+        """
+        Detects facial landmarks in a single image using the MediaPipe Face Mesh model.
+
+        Args:
+            image_cv2 (np.ndarray): The input image in OpenCV format.
+            face_mesh: An instance of the MediaPipe FaceMesh model.
+
+        Returns:
+            list: A list of numpy arrays, where each array contains the landmarks
+                  for a detected face. Returns an empty list if no faces are found.
+        """
         h, w, _ = image_cv2.shape
         results = face_mesh.process(cv2.cvtColor(image_cv2, cv2.COLOR_BGR2RGB))
         all_landmarks = []
@@ -92,7 +144,21 @@ class ImageMergeNode:
         return all_landmarks
 
     def _find_and_warp_faces(self, original_cv2, updated_cv2):
-        """Finds and warps faces from the updated image to match the original image."""
+        """
+        Finds and warps faces from the updated image to match the original image.
+
+        This function detects faces in both images, matches them based on proximity,
+        and uses a Thin Plate Spline transformation to warp the facial features of
+        the updated image to align with the original. It then seamlessly clones the
+        warped face onto the updated image.
+
+        Args:
+            original_cv2 (np.ndarray): The reference image.
+            updated_cv2 (np.ndarray): The image with faces to be warped.
+
+        Returns:
+            np.ndarray: The updated image with facial features corrected.
+        """
         try:
             mp_face_mesh = mp.solutions.face_mesh
             with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5) as face_mesh:
@@ -171,7 +237,21 @@ class ImageMergeNode:
             return updated_cv2
 
     def _seamless_clone(self, src, dst, mask, center):
-        """Performs seamless cloning to blend the warped face."""
+        """
+        Performs seamless cloning to blend a source image region into a destination.
+
+        This is a wrapper around OpenCV's seamlessClone function to provide robust
+        error handling.
+
+        Args:
+            src (np.ndarray): The source image containing the feature to be blended.
+            dst (np.ndarray): The destination image.
+            mask (np.ndarray): A mask defining the region of interest in the source.
+            center (tuple): The center coordinates for placing the cloned region.
+
+        Returns:
+            np.ndarray: The destination image with the source region seamlessly blended.
+        """
         try:
             return cv2.seamlessClone(src, dst, mask, center, cv2.NORMAL_CLONE)
         except Exception as e:
@@ -179,7 +259,19 @@ class ImageMergeNode:
             return dst
 
     def _blend_images(self, base_img: np.ndarray, blend_img: np.ndarray, mode: str) -> np.ndarray:
-        """Applies a blending mode to two images."""
+        """
+        Applies a specified blending mode to two images.
+
+        Supports several common blending modes found in image editing software.
+
+        Args:
+            base_img (np.ndarray): The base image (bottom layer).
+            blend_img (np.ndarray): The blend image (top layer).
+            mode (str): The blending mode to apply (e.g., "Overlay", "Multiply").
+
+        Returns:
+            np.ndarray: The result of the blending operation.
+        """
         if base_img.shape[:2] != blend_img.shape[:2]:
             blend_img = cv2.resize(blend_img, (base_img.shape[1], base_img.shape[0]))
 
@@ -203,6 +295,23 @@ class ImageMergeNode:
         return result_uint8
 
     def merge_images(self, original_image, updated_image, blending_mode, mixing_strength, enable_alignment, enable_facial_correction):
+        """
+        Executes the main image merging workflow for the node.
+
+        This method orchestrates the entire process, including optional alignment and
+        facial correction, followed by blending and mixing the images.
+
+        Args:
+            original_image (torch.Tensor): The reference image.
+            updated_image (torch.Tensor): The image to be modified and blended.
+            blending_mode (str): The selected blending mode.
+            mixing_strength (float): The opacity for the final blend.
+            enable_alignment (bool): If True, performs global image alignment.
+            enable_facial_correction (bool): If True, performs facial warping.
+
+        Returns:
+            (torch.Tensor,): A tuple containing the final merged image as a tensor.
+        """
         # The 'updated_image' is the one we want to modify to match the 'original_image'
         image_to_warp_cv2 = self._tensor_to_cv2(updated_image)
         # The 'original_image' is the reference
