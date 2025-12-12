@@ -31,6 +31,12 @@ class ImageMergeNode:
     FUNCTION = "merge_images"
     CATEGORY = "image/layering"
 
+    def __init__(self):
+        # Performance optimization: Initialize FaceMesh model once to avoid reloading on every execution.
+        # This significantly speeds up the facial correction process by keeping the model in memory.
+        mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5)
+
     def _tensor_to_cv2(self, tensor: torch.Tensor) -> np.ndarray:
         """Converts a torch tensor (B, H, W, C) to an OpenCV image (H, W, C, BGR)."""
         np_image = tensor.squeeze(0).cpu().numpy()
@@ -94,77 +100,74 @@ class ImageMergeNode:
     def _find_and_warp_faces(self, original_cv2, updated_cv2):
         """Finds and warps faces from the updated image to match the original image."""
         try:
-            mp_face_mesh = mp.solutions.face_mesh
-            with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5) as face_mesh:
-                original_landmarks_list = self._get_facial_landmarks(original_cv2, face_mesh)
-                updated_landmarks_list = self._get_facial_landmarks(updated_cv2, face_mesh)
+            original_landmarks_list = self._get_facial_landmarks(original_cv2, self.face_mesh)
+            updated_landmarks_list = self._get_facial_landmarks(updated_cv2, self.face_mesh)
+            if not original_landmarks_list or not updated_landmarks_list:
+                print("ImageMergeNode: No faces detected in one or both images. Skipping facial correction.")
+                return updated_cv2
 
-                if not original_landmarks_list or not updated_landmarks_list:
-                    print("ImageMergeNode: No faces detected in one or both images. Skipping facial correction.")
-                    return updated_cv2
+            print(f"ImageMergeNode: Found {len(original_landmarks_list)} face(s) in original and {len(updated_landmarks_list)} in updated.")
 
-                print(f"ImageMergeNode: Found {len(original_landmarks_list)} face(s) in original and {len(updated_landmarks_list)} in updated.")
+            final_image = updated_cv2.copy()
 
-                final_image = updated_cv2.copy()
+            # Use a comprehensive set of landmarks for detailed warping
+            key_landmarks_indices = list(itertools.chain(
+                *mp.solutions.face_mesh.FACEMESH_LIPS,
+                *mp.solutions.face_mesh.FACEMESH_LEFT_EYE,
+                *mp.solutions.face_mesh.FACEMESH_LEFT_EYEBROW,
+                *mp.solutions.face_mesh.FACEMESH_RIGHT_EYE,
+                *mp.solutions.face_mesh.FACEMESH_RIGHT_EYEBROW,
+                *mp.solutions.face_mesh.FACEMESH_FACE_OVAL,
+            ))
+            if hasattr(mp.solutions.face_mesh, 'FACEMESH_NOSE'):
+                key_landmarks_indices += list(itertools.chain(*mp.solutions.face_mesh.FACEMESH_NOSE))
 
-                # Use a comprehensive set of landmarks for detailed warping
-                key_landmarks_indices = list(itertools.chain(
-                    *mp.solutions.face_mesh.FACEMESH_LIPS,
-                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYE,
-                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYEBROW,
-                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYE,
-                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYEBROW,
-                    *mp.solutions.face_mesh.FACEMESH_FACE_OVAL,
-                ))
-                if hasattr(mp.solutions.face_mesh, 'FACEMESH_NOSE'):
-                    key_landmarks_indices += list(itertools.chain(*mp.solutions.face_mesh.FACEMESH_NOSE))
+            key_landmarks_indices = sorted(list(set(key_landmarks_indices)))
 
-                key_landmarks_indices = sorted(list(set(key_landmarks_indices)))
+            # Match faces based on proximity
+            for i, updated_landmarks in enumerate(updated_landmarks_list):
+                updated_center = updated_landmarks.mean(axis=0)
+                distances = [np.linalg.norm(updated_center - orig.mean(axis=0)) for orig in original_landmarks_list]
+                best_match_idx = np.argmin(distances)
+                original_landmarks = original_landmarks_list[best_match_idx]
 
-                # Match faces based on proximity
-                for i, updated_landmarks in enumerate(updated_landmarks_list):
-                    updated_center = updated_landmarks.mean(axis=0)
-                    distances = [np.linalg.norm(updated_center - orig.mean(axis=0)) for orig in original_landmarks_list]
-                    best_match_idx = np.argmin(distances)
-                    original_landmarks = original_landmarks_list[best_match_idx]
+                print(f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original.")
 
-                    print(f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original.")
+                # Ensure we have enough landmarks for the detailed set
+                if original_landmarks.shape[0] < max(key_landmarks_indices) + 1 or \
+                    updated_landmarks.shape[0] < max(key_landmarks_indices) + 1:
+                    print("ImageMergeNode: Not enough landmarks for detailed warping. Using all available.")
+                    source_pts = original_landmarks
+                    target_pts = updated_landmarks
+                else:
+                    source_pts = np.array([original_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
+                    target_pts = np.array([updated_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
 
-                    # Ensure we have enough landmarks for the detailed set
-                    if original_landmarks.shape[0] < max(key_landmarks_indices) + 1 or \
-                       updated_landmarks.shape[0] < max(key_landmarks_indices) + 1:
-                        print("ImageMergeNode: Not enough landmarks for detailed warping. Using all available.")
-                        source_pts = original_landmarks
-                        target_pts = updated_landmarks
-                    else:
-                        source_pts = np.array([original_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
-                        target_pts = np.array([updated_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
+                tps = cv2.createThinPlateSplineShapeTransformer()
+                source_pts_reshaped = source_pts.reshape(1, -1, 2)
+                target_pts_reshaped = target_pts.reshape(1, -1, 2)
+                matches = [cv2.DMatch(i, i, 0) for i in range(len(source_pts))]
+                tps.estimateTransformation(target_pts_reshaped, source_pts_reshaped, matches)
 
-                    tps = cv2.createThinPlateSplineShapeTransformer()
-                    source_pts_reshaped = source_pts.reshape(1, -1, 2)
-                    target_pts_reshaped = target_pts.reshape(1, -1, 2)
-                    matches = [cv2.DMatch(i, i, 0) for i in range(len(source_pts))]
-                    tps.estimateTransformation(target_pts_reshaped, source_pts_reshaped, matches)
+                warped_updated_cv2 = tps.warpImage(updated_cv2)
 
-                    warped_updated_cv2 = tps.warpImage(updated_cv2)
+                # Create a mask for the face in the original image to blend
+                hull_indices = cv2.convexHull(original_landmarks, returnPoints=False)
+                hull_points = np.array([original_landmarks[i[0]] for i in hull_indices], dtype=np.int32)
 
-                    # Create a mask for the face in the original image to blend
-                    hull_indices = cv2.convexHull(original_landmarks, returnPoints=False)
-                    hull_points = np.array([original_landmarks[i[0]] for i in hull_indices], dtype=np.int32)
+                mask = np.zeros(original_cv2.shape[:2], dtype=np.uint8)
+                cv2.fillConvexPoly(mask, hull_points, 255)
 
-                    mask = np.zeros(original_cv2.shape[:2], dtype=np.uint8)
-                    cv2.fillConvexPoly(mask, hull_points, 255)
+                # Dilate mask for smoother blending
+                kernel = np.ones((10, 10), np.uint8)
+                mask = cv2.dilate(mask, kernel, iterations=1)
 
-                    # Dilate mask for smoother blending
-                    kernel = np.ones((10, 10), np.uint8)
-                    mask = cv2.dilate(mask, kernel, iterations=1)
+                r = cv2.boundingRect(hull_points)
+                center = (r[0] + r[2] // 2, r[1] + r[3] // 2)
 
-                    r = cv2.boundingRect(hull_points)
-                    center = (r[0] + r[2] // 2, r[1] + r[3] // 2)
+                final_image = self._seamless_clone(warped_updated_cv2, final_image, mask, center)
 
-                    final_image = self._seamless_clone(warped_updated_cv2, final_image, mask, center)
-
-                return final_image
+            return final_image
 
         except Exception as e:
             print(f"ImageMergeNode: Error during facial correction: {e}. Skipping correction.")
