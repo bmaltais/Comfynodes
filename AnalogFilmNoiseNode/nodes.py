@@ -32,13 +32,15 @@ class AnalogFilmNoiseNode:
 
     def apply_film_noise(self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool):
         """
-        Adds film grain to the input image.
+        Adds film grain to the input image using a fully-vectorized PyTorch implementation.
+        This approach keeps all operations on the GPU, avoiding costly CPU-GPU data transfers
+        and leveraging parallel processing for the entire batch.
 
         Args:
-            image (torch.Tensor): The input image tensor.
+            image (torch.Tensor): The input image tensor (B, H, W, C).
             intensity (float): The strength of the noise effect.
-            grain_size (float): The size of the noise grain. Larger values create coarser grain.
-            monochrome (bool): If True, applies grayscale noise; otherwise, applies color noise.
+            grain_size (float): The size of the noise grain.
+            monochrome (bool): If True, applies grayscale noise.
 
         Returns:
             (torch.Tensor,): A tuple containing the image tensor with added noise.
@@ -46,50 +48,47 @@ class AnalogFilmNoiseNode:
         if intensity == 0:
             return (image,)
 
+        # Performance: Keep all operations on the GPU to avoid CPU bottlenecks.
+        device = image.device
         batch_size, original_height, original_width, num_channels = image.shape
 
-        # Ensure grain_size is positive to avoid division by zero
+        # Ensure grain_size is positive to avoid division by zero or invalid dimensions.
         grain_size = max(0.1, grain_size)
 
-        # Determine noise dimensions based on grain_size.
-        # A larger grain_size results in lower-resolution noise, which is then upscaled.
+        # Performance: Calculate noise dimensions once for the entire batch.
         noise_height = max(1, int(original_height / grain_size))
         noise_width = max(1, int(original_width / grain_size))
 
-        images_with_noise = []
-        for i in range(batch_size):
-            img_np = image[i].cpu().numpy()
+        # Performance: Generate noise for the entire batch at once using torch.randn on the GPU.
+        if monochrome:
+            # Create single-channel noise and expand it to all channels.
+            noise_shape = (batch_size, 1, noise_height, noise_width)
+            noise_map_small = torch.randn(noise_shape, device=device).expand(-1, num_channels, -1, -1)
+        else:
+            # Create multi-channel noise for colored grain.
+            noise_shape = (batch_size, num_channels, noise_height, noise_width)
+            noise_map_small = torch.randn(noise_shape, device=device)
 
-            # Generate noise map
-            if monochrome:
-                # Generate single-channel noise and replicate it across all channels for grayscale grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, 1))
-            else:
-                # Generate independent noise for each channel for color grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels))
+        # Performance: Use torch.nn.functional.interpolate for efficient, GPU-accelerated upscaling.
+        # This is faster and more flexible than np.kron and handles non-integer scaling factors correctly.
+        # The output from interpolate is (B, C, H, W), which is what we need.
+        noise_map_full = torch.nn.functional.interpolate(
+            noise_map_small,
+            size=(original_height, original_width),
+            mode='nearest'
+        )
 
-            # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
-            if grain_size != 1.0 and grain_size >= 1:
-                # Use np.kron for a fast nearest-neighbor style upscale
-                noise_map_resized = np.kron(noise_map_small, np.ones((int(grain_size), int(grain_size), 1)))
-            else:
-                noise_map_resized = noise_map_small
+        # Performance: Permute dimensions to match the input image (B, H, W, C) for broadcasting.
+        # This is a metadata-only operation and is extremely fast.
+        noise_map_full = noise_map_full.permute(0, 2, 3, 1)
 
-            # Trim the upscaled noise map to the exact original image dimensions
-            noise_map_full = noise_map_resized[:original_height, :original_width, :]
+        # Performance: Calibrate noise on the GPU. The mean is calculated across spatial dimensions
+        # and channels for each batch item independently, then scaled by intensity.
+        # Using keepdim=True ensures that the dimensions are broadcastable for subtraction.
+        mean_noise = torch.mean(noise_map_full, dim=(1, 2, 3), keepdim=True)
+        calibrated_noise = (noise_map_full - mean_noise) * intensity
 
-            # Ensure the noise map has the correct number of channels
-            if num_channels > 1 and noise_map_full.shape[2] == 1 and monochrome:
-                noise_map_full = np.repeat(noise_map_full, num_channels, axis=2)
-            elif noise_map_full.shape[2] != num_channels:
-                # Fallback to ensure channel count matches
-                noise_map_full = np.repeat(noise_map_full[:, :, 0:1], num_channels, axis=2)
+        # Apply noise and clip the result in a single, vectorized operation.
+        noisy_image = torch.clamp(image + calibrated_noise, 0.0, 1.0)
 
-            # Calibrate and apply noise
-            # Center the noise distribution and scale by intensity
-            calibrated_noise = (noise_map_full - np.mean(noise_map_full)) * intensity
-            noisy_img_np = np.clip(img_np + calibrated_noise, 0.0, 1.0)
-
-            images_with_noise.append(torch.from_numpy(noisy_img_np).float().cpu())
-
-        return (torch.stack(images_with_noise),)
+        return (noisy_image,)
