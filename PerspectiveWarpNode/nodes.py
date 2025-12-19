@@ -34,7 +34,7 @@ class PerspectiveWarpNode:
     CATEGORY = "Image/Transform"
     OUTPUT_NODE = False
 
-    def warp_perspective(self, image: torch.Tensor, points_json: str):
+    def warp_perspective(self, image: torch.Tensor, points_json: str = "[]"):
         """
         Applies perspective warping to the input image based on four specified corner points.
 
