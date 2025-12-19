@@ -12,27 +12,17 @@ app.registerExtension({
             // Helper to transform canvas coordinates to image-space coordinates
             const canvasToImageCoordinates = (node, canvasX, canvasY) => {
                 if (!node.image || !node.image_bounding) return [canvasX, canvasY];
-
                 const [x, y, w, h] = node.image_bounding;
                 const scale = w / node.image.width;
-
-                const imageX = (canvasX - x) / scale;
-                const imageY = (canvasY - y) / scale;
-
-                return [imageX, imageY];
+                return [(canvasX - x) / scale, (canvasY - y) / scale];
             };
 
             // Helper to transform image-space coordinates to canvas coordinates
             const imageToCanvasCoordinates = (node, imageX, imageY) => {
                 if (!node.image || !node.image_bounding) return [imageX, imageY];
-
                 const [x, y, w, h] = node.image_bounding;
                 const scale = w / node.image.width;
-
-                const canvasX = (imageX * scale) + x;
-                const canvasY = (imageY * scale) + y;
-
-                return [canvasX, canvasY];
+                return [(imageX * scale) + x, (imageY * scale) + y];
             };
 
             const onNodeCreated = nodeType.prototype.onNodeCreated;
@@ -49,28 +39,48 @@ app.registerExtension({
                 });
             };
 
+            // Override the onDrawForeground to manually draw the input image
             const onDrawForeground = nodeType.prototype.onDrawForeground;
             nodeType.prototype.onDrawForeground = function (ctx) {
                 const r = onDrawForeground?.apply(this, arguments);
+
+                // Get the image from the input slot
+                this.image = this.getInputData(0);
+
                 if (!this.image) {
                     ctx.font = "bold 16px Arial";
                     ctx.fillStyle = "rgba(255, 100, 100, 0.9)";
                     ctx.textAlign = "center";
                     ctx.fillText("Connect an image to begin", this.size[0] / 2, 20);
+                    this.image_bounding = null; // Clear bounding box if no image
                     return r;
                 }
 
-                // this.image_bounding is calculated by the original onDrawForeground
-                if (!this.image_bounding) return r;
+                // Calculate the bounding box to fit and center the image
+                const canvasWidth = this.size[0];
+                const canvasHeight = this.size[1];
+                const imgWidth = this.image.width;
+                const imgHeight = this.image.height;
+                const widget_height = 26 * this.widgets.length;
+                const available_h = canvasHeight - widget_height;
+                const scale = Math.min(canvasWidth / imgWidth, available_h / imgHeight);
+                const scaledWidth = imgWidth * scale;
+                const scaledHeight = imgHeight * scale;
+                const x = (canvasWidth - scaledWidth) / 2;
+                const y = (available_h - scaledHeight) / 2;
 
+                // Store bounding box for coordinate conversion and draw the image
+                this.image_bounding = [x, y, scaledWidth, scaledHeight];
+                ctx.drawImage(this.image, x, y, scaledWidth, scaledHeight);
+
+                // Now draw the points and UI on top of the image
                 const point_labels = ["1: Top-Left", "2: Top-Right", "3: Bottom-Left", "4: Bottom-Right"];
-
                 if (this.points.length < 4) {
                     ctx.font = "bold 16px Arial";
                     ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
                     ctx.textAlign = "center";
                     const instruction = `Click to place ${point_labels[this.points.length].split(': ')[1]} corner`;
-                    ctx.fillText(instruction, this.size[0] / 2, 20);
+                    ctx.fillText(instruction, this.size[0] / 2, y + 20);
                 }
 
                 ctx.strokeStyle = "rgba(255, 200, 200, 0.9)";
