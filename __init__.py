@@ -39,6 +39,14 @@ except ImportError:
     ImageMergeNode_class_mappings = {}
     ImageMergeNode_display_mappings = {}
 
+# Import mappings from PerspectiveWarpNode
+try:
+    from .PerspectiveWarpNode import NODE_CLASS_MAPPINGS as PerspectiveWarpNode_class_mappings, NODE_DISPLAY_NAME_MAPPINGS as PerspectiveWarpNode_display_mappings
+except ImportError:
+    print("[WARN] PerspectiveWarpNode not found. Skipping.")
+    PerspectiveWarpNode_class_mappings = {}
+    PerspectiveWarpNode_display_mappings = {}
+
 # Aggregate mappings
 NODE_CLASS_MAPPINGS = {}
 NODE_CLASS_MAPPINGS.update(AnalogFilmNoise_class_mappings)
@@ -46,6 +54,7 @@ NODE_CLASS_MAPPINGS.update(ClearGpuMemoryCache_class_mappings)
 NODE_CLASS_MAPPINGS.update(LatentByMegapixelsAndAspectRatio_class_mappings)
 NODE_CLASS_MAPPINGS.update(UpscaleImageToTotalPixels_class_mappings)
 NODE_CLASS_MAPPINGS.update(ImageMergeNode_class_mappings)
+NODE_CLASS_MAPPINGS.update(PerspectiveWarpNode_class_mappings)
 
 NODE_DISPLAY_NAME_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS.update(AnalogFilmNoise_display_mappings)
@@ -53,5 +62,6 @@ NODE_DISPLAY_NAME_MAPPINGS.update(ClearGpuMemoryCache_display_mappings)
 NODE_DISPLAY_NAME_MAPPINGS.update(LatentByMegapixelsAndAspectRatio_display_mappings)
 NODE_DISPLAY_NAME_MAPPINGS.update(UpscaleImageToTotalPixels_display_mappings)
 NODE_DISPLAY_NAME_MAPPINGS.update(ImageMergeNode_display_mappings)
+NODE_DISPLAY_NAME_MAPPINGS.update(PerspectiveWarpNode_display_mappings)
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
