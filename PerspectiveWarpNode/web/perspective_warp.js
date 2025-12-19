@@ -1,175 +1,153 @@
-import { app } from "/scripts/app.js";
-
-function getDistance(p1, p2) {
-    return Math.hypot(p1[0] - p2[0], p1[1] - p2[1]);
-}
+import { app } from "../../scripts/app.js";
 
 app.registerExtension({
-    name: "Jules.PerspectiveWarpNode",
-    async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "PerspectiveWarpNode") {
+  name: "Jules.PerspectiveWarpNode",
 
-            // Helper to transform canvas coordinates to image-space coordinates
-            const canvasToImageCoordinates = (node, canvasX, canvasY) => {
-                if (!node.previewImage || !node.image_bounding) return [canvasX, canvasY];
-                const [x, y, w, h] = node.image_bounding;
-                const scale = w / node.previewImage.width;
-                return [(canvasX - x) / scale, (canvasY - y) / scale];
-            };
+  async beforeRegisterNodeDef(nodeType, nodeData, app) {
+    if (nodeData.name !== "PerspectiveWarpNode") return;
 
-            // Helper to transform image-space coordinates to canvas coordinates
-            const imageToCanvasCoordinates = (node, imageX, imageY) => {
-                if (!node.previewImage || !node.image_bounding) return [imageX, imageY];
-                const [x, y, w, h] = node.image_bounding;
-                const scale = w / node.previewImage.width;
-                return [(imageX * scale) + x, (imageY * scale) + y];
-            };
+    // Helper functions for coordinate transformation
+    const getDistance = (p1, p2) => Math.hypot(p1[0] - p2[0], p1[1] - p2[1]);
 
-            const onNodeCreated = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function () {
-                onNodeCreated?.apply(this, arguments);
-                this.jsonWidget = this.widgets.find(w => w.name === "points_json");
-                this.points = []; // Points are stored in image-space coordinates
-                this.dragging_point_index = null;
-                this.previewImage = null; // To cache the preview image
+    const canvasToImageCoordinates = (node, canvasX, canvasY) => {
+        if (!node.previewImage || !node.image_bounding) return [canvasX, canvasY];
+        const [x, y, w, h] = node.image_bounding;
+        const scale = w / node.previewImage.width;
+        return [(canvasX - x) / scale, (canvasY - y) / scale];
+    };
 
-                this.addWidget("button", "Reset", null, () => {
-                    this.points = [];
-                    this.jsonWidget.value = "[]";
-                    this.setDirtyCanvas(true, true);
-                });
-            };
+    const imageToCanvasCoordinates = (node, imageX, imageY) => {
+        if (!node.previewImage || !node.image_bounding) return [imageX, imageY];
+        const [x, y, w, h] = node.image_bounding;
+        const scale = w / node.previewImage.width;
+        return [(imageX * scale) + x, (imageY * scale) + y];
+    };
 
-            // When the upstream node is executed, cache the preview image
-            const onExecuted = nodeType.prototype.onExecuted;
-            nodeType.prototype.onExecuted = function(message) {
-                onExecuted?.apply(this, arguments);
-                if (message?.images) {
-                    const imageInfo = message.images[0];
-                    const imageUrl = app.api.apiURL(
-                        `/view?filename=${encodeURIComponent(imageInfo.filename)}&type=${imageInfo.type}&subfolder=${encodeURIComponent(imageInfo.subfolder)}&rand=${Date.now()}`
-                    );
+    // Node lifecycle and interaction logic
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        onNodeCreated?.apply(this, arguments);
+        this.jsonWidget = this.addWidget("string", "points_json", "[]", null, { hidden: true });
+        this.addWidget("button", "Reset", null, () => {
+            this.properties.points = [];
+            this.jsonWidget.value = "[]";
+            this.setDirtyCanvas(true);
+        });
 
-                    const img = new Image();
-                    img.src = imageUrl;
-                    img.onload = () => {
-                        this.previewImage = img;
-                        this.setDirtyCanvas(true, true);
-                    };
-                }
-            };
+        this.properties = this.properties || {};
+        this.properties.points = [];
+        this.previewImage = null;
+        this.dragging_point_index = null;
+    };
 
-            // Draw the cached preview image and the UI on top of it
-            const onDrawForeground = nodeType.prototype.onDrawForeground;
-            nodeType.prototype.onDrawForeground = function (ctx) {
-                const r = onDrawForeground?.apply(this, arguments);
-
-                if (!this.previewImage) {
-                    ctx.font = "bold 16px Arial";
-                    ctx.fillStyle = "rgba(255, 100, 100, 0.9)";
-                    ctx.textAlign = "center";
-                    ctx.fillText("Run upstream node to get preview", this.size[0] / 2, 20);
-                    this.image_bounding = null;
-                    return r;
-                }
-
-                const canvasWidth = this.size[0];
-                const canvasHeight = this.size[1];
-                const imgWidth = this.previewImage.width;
-                const imgHeight = this.previewImage.height;
-                const widget_height = 26 * this.widgets.length;
-                const available_h = canvasHeight - widget_height;
-                const scale = Math.min(canvasWidth / imgWidth, available_h / imgHeight);
-                const scaledWidth = imgWidth * scale;
-                const scaledHeight = imgHeight * scale;
-                const x = (canvasWidth - scaledWidth) / 2;
-                const y = (available_h - scaledHeight) / 2;
-
-                this.image_bounding = [x, y, scaledWidth, scaledHeight];
-                ctx.drawImage(this.previewImage, x, y, scaledWidth, scaledHeight);
-
-                const point_labels = ["1: Top-Left", "2: Top-Right", "3: Bottom-Left", "4: Bottom-Right"];
-                if (this.points.length < 4) {
-                    ctx.font = "bold 16px Arial";
-                    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-                    ctx.textAlign = "center";
-                    const instruction = `Click to place ${point_labels[this.points.length].split(': ')[1]} corner`;
-                    ctx.fillText(instruction, this.size[0] / 2, y > 20 ? y - 5 : 20);
-                }
-
-                ctx.strokeStyle = "rgba(255, 200, 200, 0.9)";
-                ctx.lineWidth = 2;
-                ctx.font = "14px Arial";
-                ctx.fillStyle = "rgba(255, 200, 200, 0.9)";
-
-                for (let i = 0; i < this.points.length; i++) {
-                    const [canvasX, canvasY] = imageToCanvasCoordinates(this, this.points[i][0], this.points[i][1]);
-                    ctx.beginPath();
-                    ctx.rect(canvasX - 5, canvasY - 5, 10, 10);
-                    ctx.stroke();
-                    ctx.fillText(point_labels[i], canvasX + 10, canvasY + 5);
-                }
-
-                if (this.points.length === 4) {
-                    ctx.strokeStyle = "rgba(200, 255, 200, 0.9)";
-                    ctx.beginPath();
-                    const p1 = imageToCanvasCoordinates(this, this.points[0][0], this.points[0][1]);
-                    const p2 = imageToCanvasCoordinates(this, this.points[1][0], this.points[1][1]);
-                    const p3 = imageToCanvasCoordinates(this, this.points[2][0], this.points[2][1]);
-                    const p4 = imageToCanvasCoordinates(this, this.points[3][0], this.points[3][1]);
-                    ctx.moveTo(p1[0], p1[1]);
-                    ctx.lineTo(p2[0], p2[1]);
-                    ctx.lineTo(p4[0], p4[1]);
-                    ctx.lineTo(p3[0], p3[1]);
-                    ctx.closePath();
-                    ctx.stroke();
-                }
-
-                return r;
-            };
-
-            const onMouseDown = nodeType.prototype.onMouseDown;
-            nodeType.prototype.onMouseDown = function (e) {
-                const r = onMouseDown?.apply(this, arguments);
-                if (!this.previewImage || !this.image_bounding) return r;
-
-                for (let i = 0; i < this.points.length; i++) {
-                    const canvasPoint = imageToCanvasCoordinates(this, this.points[i][0], this.points[i][1]);
-                    if (getDistance([e.canvasX, e.canvasY], canvasPoint) < 10) {
-                        this.dragging_point_index = i;
-                        return r;
-                    }
-                }
-
-                if (this.points.length < 4) {
-                    const imagePoint = canvasToImageCoordinates(this, e.canvasX, e.canvasY);
-                    this.points.push(imagePoint);
-                    this.jsonWidget.value = JSON.stringify(this.points);
-                }
-
+    const onExecuted = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function(message) {
+        onExecuted?.apply(this, arguments);
+        if (message?.images) {
+            const imageInfo = message.images[0];
+            const imageUrl = app.api.apiURL(
+                `/view?filename=${encodeURIComponent(imageInfo.filename)}&type=${imageInfo.type}&subfolder=${encodeURIComponent(imageInfo.subfolder)}`
+            );
+            const img = new Image();
+            img.src = imageUrl;
+            img.onload = () => {
+                this.previewImage = img;
                 this.setDirtyCanvas(true, true);
-                return r;
-            };
-
-            const onMouseMove = nodeType.prototype.onMouseMove;
-            nodeType.prototype.onMouseMove = function (e) {
-                const r = onMouseMove?.apply(this, arguments);
-                if (this.dragging_point_index === null) return r;
-
-                const imagePoint = canvasToImageCoordinates(this, e.canvasX, e.canvasY);
-                this.points[this.dragging_point_index] = imagePoint;
-                this.jsonWidget.value = JSON.stringify(this.points);
-                this.setDirtyCanvas(true, true);
-
-                return r;
-            };
-
-            const onMouseUp = nodeType.prototype.onMouseUp;
-            nodeType.prototype.onMouseUp = function (e) {
-                const r = onMouseUp?.apply(this, arguments);
-                this.dragging_point_index = null;
-                return r;
             };
         }
-    },
+    };
+
+    const onDrawForeground = nodeType.prototype.onDrawForeground;
+    nodeType.prototype.onDrawForeground = function(ctx) {
+        onDrawForeground?.apply(this, arguments);
+        if (!this.previewImage) {
+            ctx.font = "bold 16px Arial";
+            ctx.fillStyle = "rgba(255, 100, 100, 0.9)";
+            ctx.textAlign = "center";
+            ctx.fillText("Run upstream node to get preview", this.size[0] / 2, 20);
+            this.image_bounding = null;
+            return;
+        }
+
+        const widget_height = this.widgets.length * 26;
+        const available_h = this.size[1] - widget_height;
+        const scale = Math.min(this.size[0] / this.previewImage.width, available_h / this.previewImage.height);
+        const w = this.previewImage.width * scale;
+        const h = this.previewImage.height * scale;
+        const x = (this.size[0] - w) / 2;
+        const y = (available_h - h) / 2;
+
+        this.image_bounding = [x, y, w, h];
+        ctx.drawImage(this.previewImage, x, y, w, h);
+
+        const points = this.properties.points;
+        const point_labels = ["1: TL", "2: TR", "3: BL", "4: BR"];
+        if (points.length < 4) {
+            ctx.font = "bold 16px Arial";
+            ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+            ctx.textAlign = "center";
+            ctx.fillText(`Click to place ${point_labels[points.length]} corner`, this.size[0] / 2, y > 20 ? y - 5 : 20);
+        }
+
+        for (let i = 0; i < points.length; i++) {
+            const [cx, cy] = imageToCanvasCoordinates(this, points[i][0], points[i][1]);
+            ctx.fillStyle = "rgba(255, 200, 200, 0.9)";
+            ctx.beginPath();
+            ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.fillText(point_labels[i], cx + 10, cy + 5);
+        }
+
+        if (points.length === 4) {
+            ctx.strokeStyle = "rgba(200, 255, 200, 0.9)";
+            ctx.lineWidth = 2;
+            const p = points.map(pt => imageToCanvasCoordinates(this, pt[0], pt[1]));
+            ctx.beginPath();
+            ctx.moveTo(p[0][0], p[0][1]);
+            ctx.lineTo(p[1][0], p[1][1]);
+            ctx.lineTo(p[3][0], p[3][1]);
+            ctx.lineTo(p[2][0], p[2][1]);
+            ctx.closePath();
+            ctx.stroke();
+        }
+    };
+
+    const onMouseDown = nodeType.prototype.onMouseDown;
+    nodeType.prototype.onMouseDown = function(e) {
+        onMouseDown?.apply(this, arguments);
+        if (!this.previewImage) return;
+
+        const points = this.properties.points;
+        for (let i = 0; i < points.length; i++) {
+            const canvasPoint = imageToCanvasCoordinates(this, points[i][0], points[i][1]);
+            if (getDistance([e.canvasX, e.canvasY], canvasPoint) < 10) {
+                this.dragging_point_index = i;
+                return;
+            }
+        }
+
+        if (points.length < 4) {
+            points.push(canvasToImageCoordinates(this, e.canvasX, e.canvasY));
+            this.jsonWidget.value = JSON.stringify(points);
+        }
+
+        this.setDirtyCanvas(true);
+    };
+
+    const onMouseMove = nodeType.prototype.onMouseMove;
+    nodeType.prototype.onMouseMove = function(e) {
+        onMouseMove?.apply(this, arguments);
+        if (this.dragging_point_index === null) return;
+
+        this.properties.points[this.dragging_point_index] = canvasToImageCoordinates(this, e.canvasX, e.canvasY);
+        this.jsonWidget.value = JSON.stringify(this.properties.points);
+        this.setDirtyCanvas(true);
+    };
+
+    const onMouseUp = nodeType.prototype.onMouseUp;
+    nodeType.prototype.onMouseUp = function(e) {
+        onMouseUp?.apply(this, arguments);
+        this.dragging_point_index = null;
+    };
+  },
 });
