@@ -45,8 +45,13 @@ app.registerExtension({
             nodeType.prototype.onExecuted = function(message) {
                 onExecuted?.apply(this, arguments);
                 if (message?.images) {
+                    const imageInfo = message.images[0];
+                    const imageUrl = app.api.apiURL(
+                        `/view?filename=${encodeURIComponent(imageInfo.filename)}&type=${imageInfo.type}&subfolder=${encodeURIComponent(imageInfo.subfolder)}&rand=${Date.now()}`
+                    );
+
                     const img = new Image();
-                    img.src = message.images[0].url;
+                    img.src = imageUrl;
                     img.onload = () => {
                         this.previewImage = img;
                         this.setDirtyCanvas(true, true);
