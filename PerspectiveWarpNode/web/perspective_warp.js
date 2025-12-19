@@ -11,17 +11,17 @@ app.registerExtension({
 
             // Helper to transform canvas coordinates to image-space coordinates
             const canvasToImageCoordinates = (node, canvasX, canvasY) => {
-                if (!node.image || !node.image_bounding) return [canvasX, canvasY];
+                if (!node.previewImage || !node.image_bounding) return [canvasX, canvasY];
                 const [x, y, w, h] = node.image_bounding;
-                const scale = w / node.image.width;
+                const scale = w / node.previewImage.width;
                 return [(canvasX - x) / scale, (canvasY - y) / scale];
             };
 
             // Helper to transform image-space coordinates to canvas coordinates
             const imageToCanvasCoordinates = (node, imageX, imageY) => {
-                if (!node.image || !node.image_bounding) return [imageX, imageY];
+                if (!node.previewImage || !node.image_bounding) return [imageX, imageY];
                 const [x, y, w, h] = node.image_bounding;
-                const scale = w / node.image.width;
+                const scale = w / node.previewImage.width;
                 return [(imageX * scale) + x, (imageY * scale) + y];
             };
 
@@ -31,6 +31,7 @@ app.registerExtension({
                 this.jsonWidget = this.widgets.find(w => w.name === "points_json");
                 this.points = []; // Points are stored in image-space coordinates
                 this.dragging_point_index = null;
+                this.previewImage = null; // To cache the preview image
 
                 this.addWidget("button", "Reset", null, () => {
                     this.points = [];
@@ -39,28 +40,38 @@ app.registerExtension({
                 });
             };
 
-            // Override the onDrawForeground to manually draw the input image
+            // When the upstream node is executed, cache the preview image
+            const onExecuted = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function(message) {
+                onExecuted?.apply(this, arguments);
+                if (message?.images) {
+                    const img = new Image();
+                    img.src = message.images[0].url;
+                    img.onload = () => {
+                        this.previewImage = img;
+                        this.setDirtyCanvas(true, true);
+                    };
+                }
+            };
+
+            // Draw the cached preview image and the UI on top of it
             const onDrawForeground = nodeType.prototype.onDrawForeground;
             nodeType.prototype.onDrawForeground = function (ctx) {
                 const r = onDrawForeground?.apply(this, arguments);
 
-                // Get the image from the input slot
-                this.image = this.getInputData(0);
-
-                if (!this.image) {
+                if (!this.previewImage) {
                     ctx.font = "bold 16px Arial";
                     ctx.fillStyle = "rgba(255, 100, 100, 0.9)";
                     ctx.textAlign = "center";
-                    ctx.fillText("Connect an image to begin", this.size[0] / 2, 20);
-                    this.image_bounding = null; // Clear bounding box if no image
+                    ctx.fillText("Run upstream node to get preview", this.size[0] / 2, 20);
+                    this.image_bounding = null;
                     return r;
                 }
 
-                // Calculate the bounding box to fit and center the image
                 const canvasWidth = this.size[0];
                 const canvasHeight = this.size[1];
-                const imgWidth = this.image.width;
-                const imgHeight = this.image.height;
+                const imgWidth = this.previewImage.width;
+                const imgHeight = this.previewImage.height;
                 const widget_height = 26 * this.widgets.length;
                 const available_h = canvasHeight - widget_height;
                 const scale = Math.min(canvasWidth / imgWidth, available_h / imgHeight);
@@ -69,18 +80,16 @@ app.registerExtension({
                 const x = (canvasWidth - scaledWidth) / 2;
                 const y = (available_h - scaledHeight) / 2;
 
-                // Store bounding box for coordinate conversion and draw the image
                 this.image_bounding = [x, y, scaledWidth, scaledHeight];
-                ctx.drawImage(this.image, x, y, scaledWidth, scaledHeight);
+                ctx.drawImage(this.previewImage, x, y, scaledWidth, scaledHeight);
 
-                // Now draw the points and UI on top of the image
                 const point_labels = ["1: Top-Left", "2: Top-Right", "3: Bottom-Left", "4: Bottom-Right"];
                 if (this.points.length < 4) {
                     ctx.font = "bold 16px Arial";
                     ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
                     ctx.textAlign = "center";
                     const instruction = `Click to place ${point_labels[this.points.length].split(': ')[1]} corner`;
-                    ctx.fillText(instruction, this.size[0] / 2, y + 20);
+                    ctx.fillText(instruction, this.size[0] / 2, y > 20 ? y - 5 : 20);
                 }
 
                 ctx.strokeStyle = "rgba(255, 200, 200, 0.9)";
@@ -117,7 +126,7 @@ app.registerExtension({
             const onMouseDown = nodeType.prototype.onMouseDown;
             nodeType.prototype.onMouseDown = function (e) {
                 const r = onMouseDown?.apply(this, arguments);
-                if (!this.image || !this.image_bounding) return r;
+                if (!this.previewImage || !this.image_bounding) return r;
 
                 for (let i = 0; i < this.points.length; i++) {
                     const canvasPoint = imageToCanvasCoordinates(this, this.points[i][0], this.points[i][1]);
