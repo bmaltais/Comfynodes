@@ -117,16 +117,16 @@ class ImageMergeNode:
             src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
             dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
 
-            M, mask = cv2.estimateAffine2D(dst_pts, src_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            M, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
 
             if M is None:
-                print("ImageMergeNode: Could not compute affine transformation. Skipping alignment.")
+                print("ImageMergeNode: Could not compute homography. Skipping alignment.")
                 return updated_cv2
 
             h, w = original_cv2.shape[:2]
-            aligned_updated_cv2 = cv2.warpAffine(updated_cv2, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+            aligned_updated_cv2 = cv2.warpPerspective(updated_cv2, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
 
-            print(f"ImageMergeNode: Aligned image with affine transformation.")
+            print(f"ImageMergeNode: Aligned image with perspective transformation.")
             return aligned_updated_cv2
 
         except Exception as e:
