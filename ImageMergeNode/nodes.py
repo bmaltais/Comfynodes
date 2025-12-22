@@ -4,12 +4,65 @@ import cv2
 import mediapipe as mp
 import itertools
 
+
+# HSL conversion functions adapted from https://github.com/limacv/RGB_HSV_HSL
+def rgb2hsl_torch(rgb: torch.Tensor) -> torch.Tensor:
+    rgb = rgb.permute(0, 3, 1, 2)
+    cmax, cmax_idx = torch.max(rgb, dim=1, keepdim=True)
+    cmin = torch.min(rgb, dim=1, keepdim=True)[0]
+    delta = cmax - cmin
+    hsl_h = torch.empty_like(rgb[:, 0:1, :, :])
+    cmax_idx[delta == 0] = 3
+    hsl_h[cmax_idx == 0] = (((rgb[:, 1:2] - rgb[:, 2:3]) / delta) % 6)[cmax_idx == 0]
+    hsl_h[cmax_idx == 1] = (((rgb[:, 2:3] - rgb[:, 0:1]) / delta) + 2)[cmax_idx == 1]
+    hsl_h[cmax_idx == 2] = (((rgb[:, 0:1] - rgb[:, 1:2]) / delta) + 4)[cmax_idx == 2]
+    hsl_h[cmax_idx == 3] = 0.
+    hsl_h /= 6.
+
+    hsl_l = (cmax + cmin) / 2.
+    hsl_s = torch.empty_like(hsl_h)
+    hsl_s[hsl_l == 0] = 0
+    hsl_s[hsl_l == 1] = 0
+    hsl_l_ma = torch.bitwise_and(hsl_l > 0, hsl_l < 1)
+    hsl_l_s0_5 = torch.bitwise_and(hsl_l_ma, hsl_l <= 0.5)
+    hsl_l_l0_5 = torch.bitwise_and(hsl_l_ma, hsl_l > 0.5)
+    hsl_s[hsl_l_s0_5] = ((cmax - cmin) / (hsl_l * 2.))[hsl_l_s0_5]
+    hsl_s[hsl_l_l0_5] = ((cmax - cmin) / (- hsl_l * 2. + 2.))[hsl_l_l0_5]
+
+    hsl = torch.cat([hsl_h, hsl_s, hsl_l], dim=1)
+    return hsl.permute(0, 2, 3, 1)
+
+def hsl2rgb_torch(hsl: torch.Tensor) -> torch.Tensor:
+    hsl = hsl.permute(0, 3, 1, 2)
+    hsl_h, hsl_s, hsl_l = hsl[:, 0:1], hsl[:, 1:2], hsl[:, 2:3]
+    _c = (-torch.abs(hsl_l * 2. - 1.) + 1) * hsl_s
+    _x = _c * (-torch.abs(hsl_h * 6. % 2. - 1) + 1.)
+    _m = hsl_l - _c / 2.
+    idx = (hsl_h * 6.).type(torch.uint8)
+    idx = (idx % 6).expand(-1, 3, -1, -1)
+    rgb = torch.empty_like(hsl)
+    _o = torch.zeros_like(_c)
+    rgb[idx == 0] = torch.cat([_c, _x, _o], dim=1)[idx == 0]
+    rgb[idx == 1] = torch.cat([_x, _c, _o], dim=1)[idx == 1]
+    rgb[idx == 2] = torch.cat([_o, _c, _x], dim=1)[idx == 2]
+    rgb[idx == 3] = torch.cat([_o, _x, _c], dim=1)[idx == 3]
+    rgb[idx == 4] = torch.cat([_x, _o, _c], dim=1)[idx == 4]
+    rgb[idx == 5] = torch.cat([_c, _o, _x], dim=1)[idx == 5]
+    rgb += _m
+    return rgb.permute(0, 2, 3, 1)
+
+
 class ImageMergeNode:
     """
     A node to merge two images with optional alignment and various blending modes.
     """
 
-    blend_modes = ["Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Color"]
+    blend_modes = [
+        "Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Color", "Darken",
+        "Color Burn", "Linear Burn", "Lighten", "Color Dodge", "Linear Dodge (Add)",
+        "Hard Light", "Vivid Light", "Linear Light", "Pin Light", "Hard Mix",
+        "Difference", "Exclusion", "Subtract", "Divide"
+    ]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -178,65 +231,93 @@ class ImageMergeNode:
             print(f"ImageMergeNode: Error during seamless cloning: {e}. Returning destination image.")
             return dst
 
-    def _blend_images(self, base_img: np.ndarray, blend_img: np.ndarray, mode: str) -> np.ndarray:
-        """Applies a blending mode to two images."""
-        if base_img.shape[:2] != blend_img.shape[:2]:
-            blend_img = cv2.resize(blend_img, (base_img.shape[1], base_img.shape[0]))
+    def _blend_images_pytorch(self, base: torch.Tensor, blend: torch.Tensor, mode: str) -> torch.Tensor:
+        """Applies a blending mode to two images using PyTorch."""
+        if base.shape[1:3] != blend.shape[1:3]:
+            blend = torch.nn.functional.interpolate(blend.permute(0, 3, 1, 2), size=base.shape[1:3], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
 
-        base = base_img[..., :3].astype(np.float32) / 255.0
-        blend = blend_img[..., :3].astype(np.float32) / 255.0
+        base_rgb = base[..., :3]
+        blend_rgb = blend[..., :3]
 
-        if mode == 'Normal': result = blend
-        elif mode == 'Multiply': result = base * blend
-        elif mode == 'Screen': result = 1 - (1 - base) * (1 - blend)
-        elif mode == 'Overlay': result = np.where(base < 0.5, 2 * base * blend, 1 - 2 * (1 - base) * (1 - blend))
-        elif mode == 'Soft Light': result = np.where(blend < 0.5, (2 * base * blend + base**2 * (1 - 2 * blend)), (np.sqrt(base) * (2 * blend - 1) + 2 * base * (1 - blend)))
+        if mode == 'Normal':
+            result = blend_rgb
+        elif mode == 'Multiply':
+            result = base_rgb * blend_rgb
+        elif mode == 'Screen':
+            result = 1 - (1 - base_rgb) * (1 - blend_rgb)
+        elif mode == 'Overlay':
+            result = torch.where(base_rgb <= 0.5, 2 * base_rgb * blend_rgb, 1 - 2 * (1 - base_rgb) * (1 - blend_rgb))
+        elif mode == 'Soft Light':
+            result = torch.where(blend_rgb <= 0.5, 2 * base_rgb * blend_rgb + base_rgb**2 * (1 - 2 * blend_rgb), 2 * base_rgb * (1 - blend_rgb) + torch.sqrt(base_rgb) * (2 * blend_rgb - 1))
+        elif mode == 'Hard Light':
+            result = torch.where(blend_rgb <= 0.5, 2 * base_rgb * blend_rgb, 1 - 2 * (1 - base_rgb) * (1 - blend_rgb))
         elif mode == 'Color':
-            base_hls = cv2.cvtColor(base_img, cv2.COLOR_BGR2HLS)
-            blend_hls = cv2.cvtColor(blend_img, cv2.COLOR_BGR2HLS)
-            result_hls = np.dstack((blend_hls[:,:,0], base_hls[:,:,1], blend_hls[:,:,2]))
-            result_bgr = cv2.cvtColor(result_hls, cv2.COLOR_HLS2BGR)
-            result = result_bgr.astype(np.float32) / 255.0
-        else: result = blend
+            base_hsl = rgb2hsl_torch(base_rgb)
+            blend_hsl = rgb2hsl_torch(blend_rgb)
+            result_hsl = torch.cat((blend_hsl[..., 0:2], base_hsl[..., 2:3]), dim=-1)
+            result = hsl2rgb_torch(result_hsl)
+        elif mode == 'Darken':
+            result = torch.min(base_rgb, blend_rgb)
+        elif mode == 'Color Burn':
+            result = 1 - (1 - base_rgb) / (blend_rgb + 1e-6)
+        elif mode == 'Linear Burn':
+            result = base_rgb + blend_rgb - 1
+        elif mode == 'Lighten':
+            result = torch.max(base_rgb, blend_rgb)
+        elif mode == 'Color Dodge':
+            result = base_rgb / (1 - blend_rgb + 1e-6)
+        elif mode == 'Linear Dodge (Add)':
+            result = base_rgb + blend_rgb
+        elif mode == 'Vivid Light':
+            result = torch.where(blend_rgb <= 0.5, 1 - (1 - base_rgb) / (2 * blend_rgb + 1e-6), base_rgb / (2 * (1 - blend_rgb) + 1e-6))
+        elif mode == 'Linear Light':
+            result = base_rgb + 2 * blend_rgb - 1
+        elif mode == 'Pin Light':
+            result = torch.where(blend_rgb <= 0.5, torch.min(base_rgb, 2 * blend_rgb), torch.max(base_rgb, 2 * blend_rgb - 1))
+        elif mode == 'Hard Mix':
+            result = torch.floor(base_rgb + blend_rgb)
+        elif mode == 'Difference':
+            result = torch.abs(base_rgb - blend_rgb)
+        elif mode == 'Exclusion':
+            result = base_rgb + blend_rgb - 2 * base_rgb * blend_rgb
+        elif mode == 'Subtract':
+            result = base_rgb - blend_rgb
+        elif mode == 'Divide':
+            result = base_rgb / (blend_rgb + 1e-6)
+        else:
+            result = blend_rgb
 
-        result_uint8 = (np.clip(result, 0, 1) * 255).astype(np.uint8)
-        return result_uint8
+        return torch.clamp(result, 0, 1)
 
     def merge_images(self, original_image, updated_image, blending_mode, mixing_strength, enable_alignment, enable_facial_correction):
         # The 'updated_image' is the one we want to modify to match the 'original_image'
-        image_to_warp_cv2 = self._tensor_to_cv2(updated_image)
         # The 'original_image' is the reference
-        reference_image_cv2 = self._tensor_to_cv2(original_image)
 
-        # Ensure images are the same size before any processing
-        h, w = reference_image_cv2.shape[:2]
-        image_to_warp_cv2 = cv2.resize(image_to_warp_cv2, (w, h))
+        h, w = original_image.shape[1:3]
+        if updated_image.shape[1:3] != (h, w):
+            updated_image = torch.nn.functional.interpolate(updated_image.permute(0, 3, 1, 2), size=(h, w), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
 
-        warped_and_aligned_cv2 = image_to_warp_cv2.copy()
+        base_tensor = updated_image
+        blend_tensor = original_image
 
-        if enable_alignment:
-            # The existing alignment aligns the 'original' to the 'updated'.
-            # We want to align the 'updated' to the 'original'.
-            # So we align `image_to_warp_cv2` to `reference_image_cv2`.
-            print("ImageMergeNode: Performing global alignment on updated image.")
-            warped_and_aligned_cv2 = self._align_images(reference_image_cv2, warped_and_aligned_cv2)
+        if enable_alignment or enable_facial_correction:
+            image_to_warp_cv2 = self._tensor_to_cv2(base_tensor)
+            reference_image_cv2 = self._tensor_to_cv2(blend_tensor)
 
-        if enable_facial_correction:
-            # Now, warp the faces of the (potentially aligned) 'updated' image to match the 'original'
-            print("ImageMergeNode: Performing facial correction on updated image.")
-            warped_and_aligned_cv2 = self._find_and_warp_faces(reference_image_cv2, warped_and_aligned_cv2)
+            warped_and_aligned_cv2 = image_to_warp_cv2.copy()
 
-        # The `base_cv2` for blending should be the final, warped version of the updated image.
-        base_cv2 = warped_and_aligned_cv2
-        # The `blend_cv2` is the original image, which acts as the top layer in blending.
-        blend_cv2 = reference_image_cv2
+            if enable_alignment:
+                print("ImageMergeNode: Performing global alignment on updated image.")
+                warped_and_aligned_cv2 = self._align_images(reference_image_cv2, warped_and_aligned_cv2)
 
-        # Get the result of the blend mode operation
-        blended_cv2 = self._blend_images(base_cv2, blend_cv2, blending_mode)
+            if enable_facial_correction:
+                print("ImageMergeNode: Performing facial correction on updated image.")
+                warped_and_aligned_cv2 = self._find_and_warp_faces(reference_image_cv2, warped_and_aligned_cv2)
 
-        # Mix the blended result with the base image using mixing_strength
-        final_cv2 = cv2.addWeighted(blended_cv2, mixing_strength, base_cv2, 1.0 - mixing_strength, 0)
+            base_tensor = self._cv2_to_tensor(warped_and_aligned_cv2)
 
-        result_tensor = self._cv2_to_tensor(final_cv2)
+        blended_tensor = self._blend_images_pytorch(base_tensor, blend_tensor, blending_mode)
 
-        return (result_tensor,)
+        final_tensor = base_tensor * (1.0 - mixing_strength) + blended_tensor * mixing_strength
+
+        return (final_tensor,)
