@@ -46,50 +46,52 @@ class AnalogFilmNoiseNode:
         if intensity == 0:
             return (image,)
 
-        batch_size, original_height, original_width, num_channels = image.shape
+        # ⚡ Bolt Optimization: Vectorized film noise generation on GPU
+        # This entire operation is moved to the GPU using PyTorch tensors to avoid
+        # slow CPU-GPU data transfers and leverage parallel processing.
+        # The previous implementation iterated through each image in the batch,
+        # converting it to a NumPy array on the CPU, which is a major performance bottleneck.
 
-        # Ensure grain_size is positive to avoid division by zero
+        batch_size, original_height, original_width, num_channels = image.shape
+        device = image.device # Get the device of the input tensor (e.g., 'cuda:0')
+
+        # Ensure grain_size is positive
         grain_size = max(0.1, grain_size)
 
         # Determine noise dimensions based on grain_size.
-        # A larger grain_size results in lower-resolution noise, which is then upscaled.
         noise_height = max(1, int(original_height / grain_size))
         noise_width = max(1, int(original_width / grain_size))
 
-        images_with_noise = []
-        for i in range(batch_size):
-            img_np = image[i].cpu().numpy()
+        # Generate noise tensor directly on the GPU
+        if monochrome:
+            # Create single-channel noise and expand it to match image channels
+            noise_shape = (batch_size, 1, noise_height, noise_width)
+            noise_map_small = torch.randn(noise_shape, device=device).expand(-1, num_channels, -1, -1)
+        else:
+            # Create multi-channel noise for color grain
+            noise_shape = (batch_size, num_channels, noise_height, noise_width)
+            noise_map_small = torch.randn(noise_shape, device=device)
 
-            # Generate noise map
-            if monochrome:
-                # Generate single-channel noise and replicate it across all channels for grayscale grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, 1))
-            else:
-                # Generate independent noise for each channel for color grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels))
+        # Upscale noise to match image dimensions using efficient interpolation
+        # Permute image from (B, H, W, C) to (B, C, H, W) for PyTorch functions
+        image_bchw = image.permute(0, 3, 1, 2)
 
-            # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
-            if grain_size != 1.0 and grain_size >= 1:
-                # Use np.kron for a fast nearest-neighbor style upscale
-                noise_map_resized = np.kron(noise_map_small, np.ones((int(grain_size), int(grain_size), 1)))
-            else:
-                noise_map_resized = noise_map_small
+        # Use interpolate for efficient, hardware-accelerated resizing on the GPU
+        noise_map_full = torch.nn.functional.interpolate(
+            noise_map_small,
+            size=(original_height, original_width),
+            mode='nearest'
+        )
 
-            # Trim the upscaled noise map to the exact original image dimensions
-            noise_map_full = noise_map_resized[:original_height, :original_width, :]
+        # Calibrate and apply noise
+        # Center the noise distribution (mean=0) and scale by intensity
+        # The view(...).mean(...) calculates the mean across H, W, and C for each batch item
+        calibrated_noise = (noise_map_full - noise_map_full.view(batch_size, -1).mean(dim=1).view(batch_size, 1, 1, 1)) * intensity
 
-            # Ensure the noise map has the correct number of channels
-            if num_channels > 1 and noise_map_full.shape[2] == 1 and monochrome:
-                noise_map_full = np.repeat(noise_map_full, num_channels, axis=2)
-            elif noise_map_full.shape[2] != num_channels:
-                # Fallback to ensure channel count matches
-                noise_map_full = np.repeat(noise_map_full[:, :, 0:1], num_channels, axis=2)
+        # Add noise to the image and clamp the result to the valid [0.0, 1.0] range
+        noisy_image_bchw = torch.clamp(image_bchw + calibrated_noise, 0.0, 1.0)
 
-            # Calibrate and apply noise
-            # Center the noise distribution and scale by intensity
-            calibrated_noise = (noise_map_full - np.mean(noise_map_full)) * intensity
-            noisy_img_np = np.clip(img_np + calibrated_noise, 0.0, 1.0)
+        # Permute back to the original (B, H, W, C) format
+        noisy_image = noisy_image_bchw.permute(0, 2, 3, 1)
 
-            images_with_noise.append(torch.from_numpy(noisy_img_np).float().cpu())
-
-        return (torch.stack(images_with_noise),)
+        return (noisy_image,)
