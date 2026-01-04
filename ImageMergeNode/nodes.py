@@ -84,6 +84,12 @@ class ImageMergeNode:
     FUNCTION = "merge_images"
     CATEGORY = "image/layering"
 
+    def __init__(self):
+        # Initialize the FaceMesh model once to avoid reloading on every execution.
+        # This significantly improves performance when facial correction is enabled.
+        mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5)
+
     def _tensor_to_cv2(self, tensor: torch.Tensor) -> np.ndarray:
         """Converts a torch tensor (B, H, W, C) to an OpenCV image (H, W, C, BGR)."""
         np_image = tensor.squeeze(0).cpu().numpy()
@@ -147,12 +153,10 @@ class ImageMergeNode:
     def _find_and_warp_faces(self, original_cv2, updated_cv2):
         """Finds and warps faces from the updated image to match the original image."""
         try:
-            mp_face_mesh = mp.solutions.face_mesh
-            with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5) as face_mesh:
-                original_landmarks_list = self._get_facial_landmarks(original_cv2, face_mesh)
-                updated_landmarks_list = self._get_facial_landmarks(updated_cv2, face_mesh)
+            original_landmarks_list = self._get_facial_landmarks(original_cv2, self.face_mesh)
+            updated_landmarks_list = self._get_facial_landmarks(updated_cv2, self.face_mesh)
 
-                if not original_landmarks_list or not updated_landmarks_list:
+            if not original_landmarks_list or not updated_landmarks_list:
                     print("ImageMergeNode: No faces detected in one or both images. Skipping facial correction.")
                     return updated_cv2
 
