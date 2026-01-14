@@ -8,6 +8,9 @@ import comfy.model_management
 import comfy.utils
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 import math
+import traceback
+import io
+import sys
 
 # Attempt to import MAX_RESOLUTION from ComfyUI's samplers, with a fallback for safety.
 try:
@@ -680,12 +683,98 @@ class UpscaleImageToTotalPixels:
         return (samples,)
 
 
+class PythonCodeNode:
+    """
+    Executes Python code from a text input.
+
+    The node provides the following variables to the executed code:
+    - `input_image`: An optional torch.Tensor from the 'image' input.
+    - `prompt_text`: An optional string from the 'prompt' input.
+
+    The code must assign its final image output (as a torch.Tensor)
+    to a variable named `output_image`.
+    """
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "code": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"multiline": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "execute_code"
+    CATEGORY = "Utilities/Code"
+
+    def execute_code(self, code, image=None, prompt=None):
+        """
+        Executes the provided Python code.
+
+        Args:
+            code (str): The Python code to execute.
+            image (torch.Tensor, optional): An input image tensor.
+            prompt (str, optional): A text prompt.
+
+        Returns:
+            (torch.Tensor,): A tuple containing the output image tensor.
+        """
+        try:
+            # Prepare the local scope for exec
+            local_scope = {
+                'input_image': image,
+                'prompt_text': prompt,
+                'torch': torch,
+                'output_image': None  # Initialize output_image
+            }
+
+            # Capture stdout to provide feedback in the console
+            old_stdout = sys.stdout
+            redirected_output = sys.stdout = io.StringIO()
+
+            exec(code, globals(), local_scope)
+
+            sys.stdout = old_stdout
+            print("PythonCodeNode execution output:\n" + redirected_output.getvalue())
+
+            output_image = local_scope.get('output_image')
+
+            if output_image is None:
+                # If no image is produced, return an empty tensor to avoid errors
+                # downstream, but with a shape that indicates an issue.
+                print("PythonCodeNode Warning: 'output_image' variable not found or is None. Returning empty tensor.")
+                return (torch.zeros((1, 1, 1, 3)),)
+
+            # Basic validation to ensure the output is a tensor
+            if not isinstance(output_image, torch.Tensor):
+                print(f"PythonCodeNode Error: 'output_image' is not a torch.Tensor, but {type(output_image)}. Returning empty tensor.")
+                return (torch.zeros((1, 1, 1, 3)),)
+
+            return (output_image,)
+
+        except Exception as e:
+            print("PythonCodeNode Error: Failed to execute code.")
+            traceback.print_exc()
+            return (torch.zeros((1, 1, 1, 3)),)
+
+
 NODE_CLASS_MAPPINGS = {
     "AnalogFilmNoiseNode": AnalogFilmNoiseNode,
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
-    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels,
+    "PythonCodeNode": PythonCodeNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -693,5 +782,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
-    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
+    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels",
+    "PythonCodeNode": "🐍 Python Code Executor"
 }
