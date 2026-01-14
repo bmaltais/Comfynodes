@@ -1,7 +1,7 @@
 opencv-python
 numpy
 mediapipe
-diffusers
+diffusers>=0.29.0
 transformers
 accelerate
 sdnq
