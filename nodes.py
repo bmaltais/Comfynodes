@@ -1,8 +1,156 @@
 import torch
 import numpy as np
+import gc
 import cv2
 import mediapipe as mp
 import itertools
+import comfy.model_management
+import comfy.utils
+from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+import math
+
+# Attempt to import MAX_RESOLUTION from ComfyUI's samplers, with a fallback for safety.
+try:
+    from comfy.samplers import MAX_RESOLUTION
+except ImportError:
+    MAX_RESOLUTION = 8192
+
+class AnalogFilmNoiseNode:
+    """
+    Applies analog film-style noise to an image. This effect simulates the grain
+    found in traditional photographic film.
+    """
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node, including the image, noise intensity,
+        grain size, and monochrome option.
+        """
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "intensity": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "grain_size": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "monochrome": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image_with_noise",)
+    FUNCTION = "apply_film_noise"
+    CATEGORY = "Image/Effects"
+    OUTPUT_NODE = False
+
+    def apply_film_noise(self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool):
+        """
+        Adds film grain to the input image.
+
+        Args:
+            image (torch.Tensor): The input image tensor.
+            intensity (float): The strength of the noise effect.
+            grain_size (float): The size of the noise grain. Larger values create coarser grain.
+            monochrome (bool): If True, applies grayscale noise; otherwise, applies color noise.
+
+        Returns:
+            (torch.Tensor,): A tuple containing the image tensor with added noise.
+        """
+        if intensity == 0:
+            return (image,)
+
+        batch_size, original_height, original_width, num_channels = image.shape
+
+        # Ensure grain_size is positive to avoid division by zero
+        grain_size = max(0.1, grain_size)
+
+        # Determine noise dimensions based on grain_size.
+        # A larger grain_size results in lower-resolution noise, which is then upscaled.
+        noise_height = max(1, int(original_height / grain_size))
+        noise_width = max(1, int(original_width / grain_size))
+
+        images_with_noise = []
+        for i in range(batch_size):
+            img_np = image[i].cpu().numpy()
+
+            # Generate noise map
+            if monochrome:
+                # Generate single-channel noise and replicate it across all channels for grayscale grain
+                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, 1))
+            else:
+                # Generate independent noise for each channel for color grain
+                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels))
+
+            # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
+            if grain_size != 1.0 and grain_size >= 1:
+                # Use np.kron for a fast nearest-neighbor style upscale
+                noise_map_resized = np.kron(noise_map_small, np.ones((int(grain_size), int(grain_size), 1)))
+            else:
+                noise_map_resized = noise_map_small
+
+            # Trim the upscaled noise map to the exact original image dimensions
+            noise_map_full = noise_map_resized[:original_height, :original_width, :]
+
+            # Ensure the noise map has the correct number of channels
+            if num_channels > 1 and noise_map_full.shape[2] == 1 and monochrome:
+                noise_map_full = np.repeat(noise_map_full, num_channels, axis=2)
+            elif noise_map_full.shape[2] != num_channels:
+                # Fallback to ensure channel count matches
+                noise_map_full = np.repeat(noise_map_full[:, :, 0:1], num_channels, axis=2)
+
+            # Calibrate and apply noise
+            # Center the noise distribution and scale by intensity
+            calibrated_noise = (noise_map_full - np.mean(noise_map_full)) * intensity
+            noisy_img_np = np.clip(img_np + calibrated_noise, 0.0, 1.0)
+
+            images_with_noise.append(torch.from_numpy(noisy_img_np).float().cpu())
+
+        return (torch.stack(images_with_noise),)
+
+
+class ClearGpuMemoryCache:
+    """
+    A node to clear the GPU's memory cache, freeing up VRAM. It can be used
+    to manage memory in complex workflows.
+    """
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node. It accepts any input as a trigger.
+        """
+        return {
+            "required": {
+                # This input is a placeholder to ensure the node executes
+                # when the workflow reaches this point. It is passed through unmodified.
+                "any_type": ("*",)
+            }
+        }
+
+    # The node passes through the input it receives, without modification.
+    RETURN_TYPES = ("*",)
+    FUNCTION = "clear_cache"
+    OUTPUT_NODE = True
+    CATEGORY = "Utilities/Memory"
+
+    def clear_cache(self, any_type):
+        """
+        Clears the CUDA cache to free up GPU memory and performs garbage collection.
+
+        Args:
+            any_type: Any data type, used as a trigger for execution and passed through.
+
+        Returns:
+            (any,): A tuple containing the unmodified input data.
+        """
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        gc.collect()
+        return (any_type,)
 
 
 # HSL conversion functions adapted from https://github.com/limacv/RGB_HSV_HSL
@@ -321,3 +469,229 @@ class ImageMergeNode:
         final_tensor = base_tensor * (1.0 - mixing_strength) + blended_tensor * mixing_strength
 
         return (final_tensor,)
+
+
+class LatentByMegapixelsAndAspectRatio:
+    """
+    Generates an empty latent image with dimensions calculated based on a target
+    megapixel count and a specific aspect ratio.
+    """
+    def __init__(self):
+        self.device = comfy.model_management.intermediate_device()
+
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "target_megapixels": ("FLOAT", {"default": 1.0, "min": 0.0625, "max": (MAX_RESOLUTION*MAX_RESOLUTION)/(1024*1024), "step": 0.1}),
+                "aspect_ratio_width": ("INT", {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+                "aspect_ratio_height": ("INT", {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+                "target_multiplier": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("LATENT", "WIDTH", "HEIGHT", "TARGET_WIDTH", "TARGET_HEIGHT")
+    FUNCTION = "generate"
+    CATEGORY = "latent"
+
+    def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1, target_multiplier=1.0):
+        """
+        Calculates dimensions from megapixels and aspect ratio, then creates an empty latent.
+
+        Args:
+            target_megapixels (float): The desired total megapixels (e.g., 1.0 for 1024x1024).
+            aspect_ratio_width (int): The width component of the aspect ratio.
+            aspect_ratio_height (int): The height component of the aspect ratio.
+            batch_size (int): The number of latent images to generate.
+            target_multiplier (float): A multiplier to calculate target dimensions for other uses.
+
+        Returns:
+            (dict, int, int, int, int): A tuple containing the latent tensor, base width,
+            base height, target width, and target height.
+        """
+        # Calculate total pixels from megapixels
+        target_total_pixels = target_megapixels * 1024 * 1024
+
+        # Calculate a scaling factor 's' such that (s * W) * (s * H) = total_pixels
+        unit_block_area = aspect_ratio_width * aspect_ratio_height
+        scaling_factor = math.sqrt(target_total_pixels / unit_block_area)
+
+        # Calculate initial dimensions
+        initial_width = aspect_ratio_width * scaling_factor
+        initial_height = aspect_ratio_height * scaling_factor
+
+        # Round to the nearest multiple of 8, ensuring a minimum of 8
+        width = max(8, round(initial_width / 8.0) * 8)
+        height = max(8, round(initial_height / 8.0) * 8)
+
+        # Enforce MAX_RESOLUTION while attempting to maintain aspect ratio
+        current_aspect_ratio = width / height if height != 0 else 1.0
+        if width > MAX_RESOLUTION:
+            width = MAX_RESOLUTION
+            height = max(8, round((width / current_aspect_ratio) / 8.0) * 8)
+        if height > MAX_RESOLUTION:
+            height = MAX_RESOLUTION
+            width = max(8, round((height * current_aspect_ratio) / 8.0) * 8)
+
+        # Final cap to ensure dimensions are within limits after adjustments
+        width = min(width, MAX_RESOLUTION)
+        height = min(height, MAX_RESOLUTION)
+
+        # A common minimum dimension for stable diffusion is 16
+        min_pixel_dim = 16
+        width = max(min_pixel_dim, width)
+        height = max(min_pixel_dim, height)
+
+        # Calculate target dimensions based on the multiplier
+        target_width = max(min_pixel_dim, round((width * target_multiplier) / 8.0) * 8)
+        target_height = max(min_pixel_dim, round((height * target_multiplier) / 8.0) * 8)
+
+        # Cap target dimensions by MAX_RESOLUTION
+        target_width = min(target_width, MAX_RESOLUTION)
+        target_height = min(target_height, MAX_RESOLUTION)
+
+        # Create the empty latent tensor
+        latent_width = width // 8
+        latent_height = height // 8
+        latent = torch.zeros([batch_size, 4, latent_height, latent_width], device=self.device)
+
+        actual_megapixels = (width * height) / (1024*1024)
+        ui_text = f"{width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"
+
+        return ({"samples": latent, "ui": {"text": ui_text}}, width, height, target_width, target_height)
+
+
+class UpscaleImageToTotalPixels:
+    """
+    Upscales an image to a target total pixel count using an upscaling model.
+    If the image is already larger than the target, it's downscaled.
+    """
+    rescale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "upscale"
+    CATEGORY = "image/upscaling"
+
+    def __init__(self):
+        self.__imageScaler = ImageUpscaleWithModel()
+
+    @classmethod
+    def INPUT_TYPES(self):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "upscale_model": ("UPSCALE_MODEL",),
+                "image": ("IMAGE",),
+                "total_megapixels": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "rescale_method": (self.rescale_methods,),
+                "skip_model_upscale": ("BOOLEAN", {"default": False}),
+                "make_divisible_by": ("INT", {"default": 1, "min": 1, "max": 128, "step": 1}),
+            }
+        }
+
+    def upscale(self, upscale_model, image, total_megapixels, rescale_method, skip_model_upscale, make_divisible_by):
+        """
+        Performs the upscaling or downscaling with optional divisibility constraints.
+
+        Args:
+            upscale_model: The upscaling model to use.
+            image (torch.Tensor): The input image tensor.
+            total_megapixels (float): The target total megapixels.
+            rescale_method (str): The resampling method for scaling.
+            skip_model_upscale (bool): If True, skips model-based upscaling.
+            make_divisible_by (int): Ensures final dimensions are divisible by this number.
+
+        Returns:
+            (torch.Tensor,): A tuple containing the rescaled image tensor.
+        """
+        samples = image.movedim(-1, 1)
+        original_width = samples.shape[3]
+        original_height = samples.shape[2]
+
+        target_pixels = total_megapixels * 1000000
+        current_pixels = original_width * original_height
+
+        # --- Step 1: Initial Upscale (if necessary) ---
+        if current_pixels < target_pixels:
+            if not skip_model_upscale:
+                samples = self.__imageScaler.upscale(upscale_model, image)[0].movedim(-1, 1)
+            else:
+                # Scale up to the target pixel count using standard resampling
+                ratio = (target_pixels / current_pixels) ** 0.5
+                target_width = round(original_width * ratio)
+                target_height = round(original_height * ratio)
+                samples = comfy.utils.common_upscale(samples, target_width, target_height, rescale_method, "disabled")
+
+        # --- Step 2: Calculate Final Dimensions with Divisibility ---
+        current_width = samples.shape[3]
+        current_height = samples.shape[2]
+
+        # Determine the dimensions needed to hit the target pixel count while maintaining aspect ratio
+        ratio = (target_pixels / (current_width * current_height)) ** 0.5
+        adjustable_width = round(current_width * ratio)
+        adjustable_height = round(current_height * ratio)
+
+        final_width = adjustable_width
+        final_height = adjustable_height
+
+        m = make_divisible_by
+        if m > 1:
+            w, h = adjustable_width, adjustable_height
+
+            def ceil_m(val, mult):
+                return (val + mult - 1) // mult * mult
+
+            def floor_m(val, mult):
+                return (val // mult) * mult
+
+            w_rem = w % m
+            h_rem = h % m
+
+            if not (w_rem == 0 and h_rem == 0):
+                # Candidate 1: one dimension up, one down
+                if w_rem > h_rem or (w_rem == h_rem and w >= h):
+                    cand_w = ceil_m(w, m)
+                    cand_h = floor_m(h, m)
+                else:
+                    cand_h = ceil_m(h, m)
+                    cand_w = floor_m(w, m)
+
+                # Check if candidate 1 meets the minimum pixel requirement
+                if cand_w * cand_h >= target_pixels:
+                    final_width = cand_w
+                    final_height = cand_h
+                else:
+                    # Candidate 2: both dimensions up
+                    final_width = ceil_m(w, m)
+                    final_height = ceil_m(h, m)
+
+        # --- Step 3: Final Resize ---
+        if final_width != current_width or final_height != current_height:
+            samples = comfy.utils.common_upscale(samples, final_width, final_height, rescale_method, "disabled")
+
+        samples = samples.movedim(1, -1)
+        return (samples,)
+
+
+NODE_CLASS_MAPPINGS = {
+    "AnalogFilmNoiseNode": AnalogFilmNoiseNode,
+    "ClearGpuMemoryCache": ClearGpuMemoryCache,
+    "ImageMergeNode": ImageMergeNode,
+    "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "AnalogFilmNoiseNode": "🎞️ Analog Film Noise",
+    "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
+    "ImageMergeNode": "Image Merge (Align & Blend)",
+    "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
+    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
+}
