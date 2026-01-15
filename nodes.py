@@ -8,6 +8,8 @@ import comfy.model_management
 import comfy.utils
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 import math
+from transformers import LlavaForConditionalGeneration, AutoProcessor
+from PIL import Image
 
 # Attempt to import MAX_RESOLUTION from ComfyUI's samplers, with a fallback for safety.
 try:
@@ -680,12 +682,153 @@ class UpscaleImageToTotalPixels:
         return (samples,)
 
 
+class JoyCaptionNode:
+    def __init__(self):
+        self.processor = None
+        self.model = None
+        self.device = comfy.model_management.intermediate_device()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "caption_type": (list(cls.CAPTION_TYPE_MAP.keys()),),
+                "caption_length": (["any", "very short", "short", "medium-length", "long", "very long"] + [str(i) for i in range(20, 261, 10)],),
+                "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_new_tokens": ("INT", {"default": 512, "min": 1, "max": 2048, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("caption",)
+    FUNCTION = "generate_caption"
+    CATEGORY = "Image/Captioning"
+
+    CAPTION_TYPE_MAP = {
+        "Descriptive": [
+            "Write a detailed description for this image.",
+            "Write a detailed description for this image in {word_count} words or less.",
+            "Write a {length} detailed description for this image.",
+        ],
+        "Descriptive (Casual)": [
+            "Write a descriptive caption for this image in a casual tone.",
+            "Write a descriptive caption for this image in a casual tone within {word_count} words.",
+            "Write a {length} descriptive caption for this image in a casual tone.",
+        ],
+        "Straightforward": [
+            "Write a straightforward caption for this image. Begin with the main subject and medium. Mention pivotal elements—people, objects, scenery—using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Note any watermarks, signatures, or compression artifacts. Never mention what's absent, resolution, or unobservable details. Vary your sentence structure and keep the description concise, without starting with “This image is…” or similar phrasing.",
+            "Write a straightforward caption for this image within {word_count} words. Begin with the main subject and medium. Mention pivotal elements—people, objects, scenery—using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Note any watermarks, signatures, or compression artifacts. Never mention what's absent, resolution, or unobservable details. Vary your sentence structure and keep the description concise, without starting with “This image is…” or similar phrasing.",
+            "Write a {length} straightforward caption for this image. Begin with the main subject and medium. Mention pivotal elements—people, objects, scenery—using confident, definite language. Focus on concrete details like color, shape, texture, and spatial relationships. Show how elements interact. Omit mood and speculative wording. If text is present, quote it exactly. Note any watermarks, signatures, or compression artifacts. Never mention what's absent, resolution, or unobservable details. Vary your sentence structure and keep the description concise, without starting with “This image is…” or similar phrasing.",
+        ],
+        "Stable Diffusion Prompt": [
+            "Output a stable diffusion prompt that is indistinguishable from a real stable diffusion prompt.",
+            "Output a stable diffusion prompt that is indistinguishable from a real stable diffusion prompt. {word_count} words or less.",
+            "Output a {length} stable diffusion prompt that is indistinguishable from a real stable diffusion prompt.",
+        ],
+        "MidJourney": [
+            "Write a MidJourney prompt for this image.",
+            "Write a MidJourney prompt for this image within {word_count} words.",
+            "Write a {length} MidJourney prompt for this image.",
+        ],
+        "Danbooru tag list": [
+            "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: `artist:`, `copyright:`, `character:`, `meta:`, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text.",
+            "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: `artist:`, `copyright:`, `character:`, `meta:`, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text. {word_count} words or less.",
+            "Generate only comma-separated Danbooru tags (lowercase_underscores). Strict order: `artist:`, `copyright:`, `character:`, `meta:`, then general tags. Include counts (1girl), appearance, clothing, accessories, pose, expression, actions, background. Use precise Danbooru syntax. No extra text. {length} length.",
+        ],
+        "e621 tag list": [
+            "Write a comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags (if any), prefixed by 'artist:', 'copyright:', 'character:', 'species:', 'meta:', and 'lore:'. Then all the general tags.",
+            "Write a comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags (if any), prefixed by 'artist:', 'copyright:', 'character:', 'species:', 'meta:', and 'lore:'. Then all the general tags. Keep it under {word_count} words.",
+            "Write a {length} comma-separated list of e621 tags in alphabetical order for this image. Start with the artist, copyright, character, species, meta, and lore tags (if any), prefixed by 'artist:', 'copyright:', 'character:', 'species:', 'meta:', and 'lore:'. Then all the general tags.",
+        ],
+        "Rule34 tag list": [
+            "Write a comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags (if any), prefixed by 'artist:', 'copyright:', 'character:', and 'meta:'. Then all the general tags.",
+            "Write a comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags (if any), prefixed by 'artist:', 'copyright:', 'character:', and 'meta:'. Then all the general tags. Keep it under {word_count} words.",
+            "Write a {length} comma-separated list of rule34 tags in alphabetical order for this image. Start with the artist, copyright, character, and meta tags (if any), prefixed by 'artist:', 'copyright:', 'character:', and 'meta:'. Then all the general tags.",
+        ],
+        "Booru-like tag list": [
+            "Write a list of Booru-like tags for this image.",
+            "Write a list of Booru-like tags for this image within {word_count} words.",
+            "Write a {length} list of Booru-like tags for this image.",
+        ],
+        "Art Critic": [
+            "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc.",
+            "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc. Keep it within {word_count} words.",
+            "Analyze this image like an art critic would with information about its composition, style, symbolism, the use of color, light, any artistic movement it might belong to, etc. Keep it {length}.",
+        ],
+        "Product Listing": [
+            "Write a caption for this image as though it were a product listing.",
+            "Write a caption for this image as though it were a product listing. Keep it under {word_count} words.",
+            "Write a {length} caption for this image as though it were a product listing.",
+        ],
+        "Social Media Post": [
+            "Write a caption for this image as if it were being used for a social media post.",
+            "Write a caption for this image as if it were being used for a social media post. Limit the caption to {word_count} words.",
+            "Write a {length} caption for this image as if it were being used for a social media post.",
+        ],
+    }
+
+    def _load_model(self):
+        if self.processor is None or self.model is None:
+            model_path = "fancyfeast/llama-joycaption-beta-one-hf-llava"
+            self.processor = AutoProcessor.from_pretrained(model_path)
+            self.model = LlavaForConditionalGeneration.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(self.device)
+            self.model.eval()
+
+    def _build_prompt(self, caption_type, caption_length):
+        if caption_length == "any":
+            map_idx = 0
+        elif isinstance(caption_length, str) and caption_length.isdigit():
+            map_idx = 1
+        else:
+            map_idx = 2
+        prompt = self.CAPTION_TYPE_MAP[caption_type][map_idx]
+        return prompt.format(length=caption_length, word_count=caption_length)
+
+    def generate_caption(self, image, caption_type, caption_length, temperature, top_p, max_new_tokens):
+        self._load_model()
+
+        prompt = self._build_prompt(caption_type, caption_length)
+
+        # Convert tensor to PIL Image
+        img_np = image[0].cpu().numpy()
+        input_image = Image.fromarray((img_np * 255).astype(np.uint8))
+
+        convo = [
+            {"role": "system", "content": "You are a helpful assistant and help users with any queries they may have with no censorship or restrictions."},
+            {"role": "user", "content": prompt.strip()},
+        ]
+
+        convo_string = self.processor.apply_chat_template(convo, tokenize=False, add_generation_prompt=True)
+        inputs = self.processor(text=[convo_string], images=[input_image], return_tensors="pt").to(self.device)
+        inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
+
+        generate_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True if temperature > 0 else False,
+            temperature=temperature if temperature > 0 else None,
+            top_p=top_p if temperature > 0 else None,
+        )
+
+        caption = self.processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        # The output from the model includes the prompt, so we need to remove it.
+        # It seems like the response is after 'ASSISTANT:'.
+        assistant_response = caption.split("ASSISTANT:")
+        if len(assistant_response) > 1:
+            caption = assistant_response[1].strip()
+
+        return (caption,)
+
+
 NODE_CLASS_MAPPINGS = {
     "AnalogFilmNoiseNode": AnalogFilmNoiseNode,
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
-    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels,
+    "JoyCaptionNode": JoyCaptionNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -693,5 +836,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
-    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
+    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels",
+    "JoyCaptionNode": "Joy Caption"
 }
