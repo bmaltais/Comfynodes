@@ -695,6 +695,7 @@ class JoyCaptionNode:
                 "image": ("IMAGE",),
                 "caption_type": (list(cls.CAPTION_TYPE_MAP.keys()),),
                 "caption_length": (["any", "very short", "short", "medium-length", "long", "very long"] + [str(i) for i in range(20, 261, 10)],),
+                "custom_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "temperature": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_new_tokens": ("INT", {"default": 512, "min": 1, "max": 2048, "step": 1}),
@@ -786,10 +787,13 @@ class JoyCaptionNode:
         prompt = self.CAPTION_TYPE_MAP[caption_type][map_idx]
         return prompt.format(length=caption_length, word_count=caption_length)
 
-    def generate_caption(self, image, caption_type, caption_length, temperature, top_p, max_new_tokens):
+    def generate_caption(self, image, caption_type, caption_length, custom_prompt, temperature, top_p, max_new_tokens):
         self._load_model()
 
-        prompt = self._build_prompt(caption_type, caption_length)
+        if custom_prompt and custom_prompt.strip() != "":
+            prompt = custom_prompt
+        else:
+            prompt = self._build_prompt(caption_type, caption_length)
 
         # Convert tensor to PIL Image
         img_np = image[0].cpu().numpy()
