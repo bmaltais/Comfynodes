@@ -1,3 +1,4 @@
 opencv-python
 numpy
 mediapipe
+git+https://github.com/ysharma3501/LuxTTS.git

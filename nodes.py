@@ -8,6 +8,10 @@ import comfy.model_management
 import comfy.utils
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 import math
+from zipvoice.luxvoice import LuxTTS
+import os
+import folder_paths
+import torchaudio
 
 # Attempt to import MAX_RESOLUTION from ComfyUI's samplers, with a fallback for safety.
 try:
@@ -685,7 +689,10 @@ NODE_CLASS_MAPPINGS = {
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
-    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels,
+    "LuxTTSLoaderNode": LuxTTSLoaderNode,
+    "LuxTTSVoiceEncoderNode": LuxTTSVoiceEncoderNode,
+    "LuxTTSTextToSpeechNode": LuxTTSTextToSpeechNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -693,5 +700,114 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
-    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
+    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels",
+    "LuxTTSLoaderNode": "LuxTTS Loader",
+    "LuxTTSVoiceEncoderNode": "LuxTTS Voice Encoder",
+    "LuxTTSTextToSpeechNode": "LuxTTS Text to Speech",
 }
+
+class LuxTTSLoaderNode:
+    """
+    A node to load the LuxTTS model.
+    """
+    def __init__(self):
+        self.model = None
+        self.cached_device = None
+        self.cached_threads = None
+
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "device": (["cuda", "cpu"],),
+                "threads": ("INT", {"default": 4, "min": 1, "max": 16}),
+            }
+        }
+
+    RETURN_TYPES = ("LUX_TTS_MODEL",)
+    FUNCTION = "load_model"
+    CATEGORY = "Audio/LuxTTS"
+
+    def load_model(self, device, threads):
+        """
+        Loads the LuxTTS model, reloading if settings change.
+        """
+        if self.model is None or self.cached_device != device or self.cached_threads != threads:
+            self.model = LuxTTS('YatharthS/LuxTTS', device=device, threads=threads)
+            self.cached_device = device
+            self.cached_threads = threads
+        return (self.model,)
+
+class LuxTTSVoiceEncoderNode:
+    """
+    A node to encode a voice for LuxTTS.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "lux_tts_model": ("LUX_TTS_MODEL",),
+                "audio_file": ("STRING", {"default": "audio_file.wav"}),
+                "rms": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 0.1, "step": 0.001}),
+            }
+        }
+
+    RETURN_TYPES = ("LUX_TTS_PROMPT",)
+    FUNCTION = "encode_voice"
+    CATEGORY = "Audio/LuxTTS"
+
+    def encode_voice(self, lux_tts_model, audio_file, rms):
+        """
+        Encodes a voice from an audio file.
+        """
+        input_dir = folder_paths.get_input_directory()
+        audio_path = os.path.join(input_dir, audio_file)
+        encoded_prompt = lux_tts_model.encode_prompt(audio_path, rms=rms)
+        return (encoded_prompt,)
+
+class LuxTTSTextToSpeechNode:
+    """
+    A node to generate speech from text using LuxTTS.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node.
+        """
+        return {
+            "required": {
+                "lux_tts_model": ("LUX_TTS_MODEL",),
+                "lux_tts_prompt": ("LUX_TTS_PROMPT",),
+                "text": ("STRING", {"multiline": True, "default": "Hello, world!"}),
+                "num_steps": ("INT", {"default": 4, "min": 1, "max": 20}),
+                "t_shift": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "speed": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 2.0, "step": 0.1}),
+                "return_smooth": ("BOOLEAN", {"default": False}),
+                "output_filename": ("STRING", {"default": "output.wav"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("audio_file",)
+    FUNCTION = "generate_speech"
+    CATEGORY = "Audio/LuxTTS"
+    OUTPUT_NODE = True
+
+    def generate_speech(self, lux_tts_model, lux_tts_prompt, text, num_steps, t_shift, speed, return_smooth, output_filename):
+        """
+        Generates speech from text.
+        """
+        final_wav = lux_tts_model.generate_speech(text, lux_tts_prompt, num_steps=num_steps, t_shift=t_shift, speed=speed, return_smooth=return_smooth)
+
+        output_dir = folder_paths.get_output_directory()
+        output_path = os.path.join(output_dir, output_filename)
+
+        torchaudio.save(output_path, final_wav.unsqueeze(0), 48000)
+
+        return (output_filename,)
