@@ -274,7 +274,7 @@ class ImageMergeNode:
             h, w = original_cv2.shape[:2]
             aligned_updated_cv2 = cv2.warpPerspective(updated_cv2, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
 
-            print(f"ImageMergeNode: Aligned image with perspective transformation.")
+            print("ImageMergeNode: Aligned image with perspective transformation.")
             return aligned_updated_cv2
 
         except Exception as e:
@@ -680,9 +680,100 @@ class UpscaleImageToTotalPixels:
         return (samples,)
 
 
+class ColorMatchNode:
+    """
+    Adjusts the color profile of a target image to match a reference image using the Reinhard method.
+    This is useful for ensuring consistent lighting and color across different images in a workflow.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        """
+        Defines the input types for the node, including the target image, reference image,
+        and the strength of the color matching effect.
+        """
+        return {
+            "required": {
+                "target": ("IMAGE",),
+                "reference": ("IMAGE",),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "match_colors"
+    CATEGORY = "image/color"
+
+    def _tensor_to_cv2(self, tensor: torch.Tensor) -> np.ndarray:
+        """Converts a torch tensor (H, W, C) to an OpenCV image (H, W, C, BGR)."""
+        np_image = tensor.cpu().numpy()
+        return cv2.cvtColor((np_image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    def match_colors(self, target: torch.Tensor, reference: torch.Tensor, strength: float):
+        """
+        Matches the color distribution of the target image(s) to the reference image(s).
+
+        Args:
+            target (torch.Tensor): The image(s) to be color-corrected.
+            reference (torch.Tensor): The image(s) providing the reference color profile.
+            strength (float): Blending factor between the original and corrected image.
+
+        Returns:
+            (torch.Tensor,): A tuple containing the color-matched image tensor.
+        """
+        if strength == 0:
+            return (target,)
+
+        batch_size = target.shape[0]
+        ref_batch_size = reference.shape[0]
+
+        result_images = []
+
+        for i in range(batch_size):
+            # Use the corresponding reference image, or the last one if the reference batch is smaller
+            ref_idx = min(i, ref_batch_size - 1)
+
+            tar_cv2 = self._tensor_to_cv2(target[i])
+            ref_cv2 = self._tensor_to_cv2(reference[ref_idx])
+
+            # Convert to LAB color space for better channel decorrelation
+            tar_lab = cv2.cvtColor(tar_cv2, cv2.COLOR_BGR2LAB).astype(np.float32)
+            ref_lab = cv2.cvtColor(ref_cv2, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+            # Calculate mean and standard deviation for both images
+            tar_mean, tar_std = cv2.meanStdDev(tar_lab)
+            ref_mean, ref_std = cv2.meanStdDev(ref_lab)
+
+            # Reshape stats for broadcasting across the image dimensions
+            tar_mean = tar_mean.reshape((1, 1, 3))
+            tar_std = tar_std.reshape((1, 1, 3))
+            ref_mean = ref_mean.reshape((1, 1, 3))
+            ref_std = ref_std.reshape((1, 1, 3))
+
+            # Apply Reinhard color transfer: (tar - tar_mean) * (ref_std / tar_std) + ref_mean
+            # Add a small epsilon to avoid division by zero
+            matched_lab = (tar_lab - tar_mean) * (ref_std / (tar_std + 1e-6)) + ref_mean
+            matched_lab = np.clip(matched_lab, 0, 255).astype(np.uint8)
+
+            # Convert back to BGR then RGB
+            matched_bgr = cv2.cvtColor(matched_lab, cv2.COLOR_LAB2BGR)
+            matched_rgb = cv2.cvtColor(matched_bgr, cv2.COLOR_BGR2RGB)
+
+            matched_tensor = torch.from_numpy(matched_rgb.astype(np.float32) / 255.0).to(target.device)
+
+            # Blend the result with the original target image based on the strength parameter
+            if strength < 1.0:
+                matched_tensor = target[i] * (1.0 - strength) + matched_tensor * strength
+
+            result_images.append(matched_tensor)
+
+        return (torch.stack(result_images),)
+
+
 NODE_CLASS_MAPPINGS = {
     "AnalogFilmNoiseNode": AnalogFilmNoiseNode,
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
+    "ColorMatchNode": ColorMatchNode,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
     "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
@@ -691,6 +782,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnalogFilmNoiseNode": "🎞️ Analog Film Noise",
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
+    "ColorMatchNode": "🎨 Color Match (Reinhard)",
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
     "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
