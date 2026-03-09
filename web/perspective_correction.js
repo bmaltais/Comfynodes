@@ -31,6 +31,9 @@ app.registerExtension({
 
             this.serialize_widgets = true;
 
+            // Enable Ctrl+V paste routing in ComfyUI's usePaste handler
+            this.previewMediaType = "image";
+
             // Per-node interactive state
             this._persp = {
                 points:      [],   // [{x,y}] normalised [0..1] within image
@@ -44,8 +47,16 @@ app.registerExtension({
             const cpw = this.widgets?.find(w => w.name === "corner_points");
             if (cpw) {
                 cpw.type        = "hidden";
-                cpw.hidden      = true;        // belt-and-suspenders
+                cpw.hidden      = true;
                 cpw.computeSize = () => [0, -4];
+            }
+
+            // Hide the pasted_image combo widget (managed programmatically)
+            const piw = this.widgets?.find(w => w.name === "pasted_image");
+            if (piw) {
+                piw.type        = "hidden";
+                piw.hidden      = true;
+                piw.computeSize = () => [0, -4];
             }
 
             // Visible Reset button
@@ -63,11 +74,28 @@ app.registerExtension({
         };
 
         // ── onAdded ───────────────────────────────────────────────────────────
-        // Re-bind in onAdded too (called after workflow load), to be safe.
+        // Re-bind mouse handlers in onAdded (called after workflow load).
+        // Also register drag-drop / paste hooks here so they fire for both
+        // freshly-created and loaded nodes.
         const origAdded = nodeType.prototype.onAdded;
         nodeType.prototype.onAdded = function () {
             origAdded?.apply(this, arguments);
             _bindMouseHandlers(this);
+            _bindDragPasteHooks(this);
+        };
+
+        // ── onConnectionsChange ───────────────────────────────────────────────
+        nodeType.prototype.onConnectionsChange = function (type, index, connected) {
+            const inputSlot = this.inputs?.[index];
+            if (type === LiteGraph.INPUT && inputSlot?.type === "IMAGE" && connected) {
+                const piw = this.widgets?.find(w => w.name === "pasted_image");
+                if (piw?.value) {
+                    piw.value = "";
+                    this._persp.imgLoaded = false;
+                    this._persp.img       = null;
+                    this.setDirtyCanvas(true, true);
+                }
+            }
         };
 
         // ── onExecuted ───────────────────────────────────────────────────────
@@ -92,6 +120,13 @@ app.registerExtension({
                 const previewH = Math.round(previewW * img.naturalHeight / img.naturalWidth);
                 const wh       = _widgetAreaH(this);
                 this.size[1]   = wh + PREVIEW_PAD_TOP + Math.max(previewH, 100) + BOTTOM_MARGIN;
+
+                // Backend signals the wire took over — clear the stale paste widget
+                if (message.clear_pasted_image) {
+                    const piw = this.widgets?.find(w => w.name === "pasted_image");
+                    if (piw) piw.value = "";
+                    // Do NOT blank img/imgLoaded — the preview we just loaded is correct
+                }
 
                 this.setDirtyCanvas(true);
             };
@@ -118,11 +153,11 @@ app.registerExtension({
                 ctx.textAlign    = "center";
                 ctx.textBaseline = "middle";
                 ctx.fillText(
-                    "Run the node once to load the image,",
+                    "Drop / paste an image here, or wire one in",
                     preview.x + preview.w / 2, preview.y + preview.h / 2 - 8,
                 );
                 ctx.fillText(
-                    "then click 4 corners to define perspective.",
+                    "then run the node to enable point-picking.",
                     preview.x + preview.w / 2, preview.y + preview.h / 2 + 8,
                 );
             }
@@ -188,24 +223,189 @@ app.registerExtension({
         const origConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             origConfigure?.apply(this, arguments);
-            // Ensure state exists (might be called before onNodeCreated in rare cases)
-            if (!this._persp) this._persp = { points: [], draggingIdx: -1, hoverIdx: -1, imgLoaded: false, img: null };
+            if (!this._persp) {
+                this._persp = { points: [], draggingIdx: -1, hoverIdx: -1, imgLoaded: false, img: null };
+            }
             const cpw = this.widgets?.find(w => w.name === "corner_points");
-            if (!cpw) return;
-            try {
-                const raw = JSON.parse(cpw.value || "[]");
-                this._persp.points = raw.map(p => ({ x: p[0], y: p[1] }));
-            } catch {
-                this._persp.points = [];
+            if (cpw) {
+                try {
+                    const raw = JSON.parse(cpw.value || "[]");
+                    this._persp.points = raw.map(p => ({ x: p[0], y: p[1] }));
+                } catch {
+                    this._persp.points = [];
+                }
+            }
+            // Clear stale pasted_image if a wire is already connected at load time
+            const imageInputConnected = this.inputs?.some(
+                inp => inp.type === "IMAGE" && inp.link != null
+            );
+            if (imageInputConnected) {
+                const piw = this.widgets?.find(w => w.name === "pasted_image");
+                if (piw?.value) piw.value = "";
             }
         };
     },
 });
 
+// ─── Drag-drop / paste hook binding ──────────────────────────────────────────
+
+function _bindDragPasteHooks(node) {
+
+    // Show ComfyUI's blue drag-over border for file drags
+    const origDragOver = node.onDragOver;
+    node.onDragOver = function (e) {
+        const handled = origDragOver?.call(this, e);
+        if (handled) return true;
+        return _hasFileItems(e);
+    };
+
+    // OS drag-and-drop (primary drop hook)
+    node.onDragDrop = function (...args) {
+        const file = _extractImageFile(args);
+        if (!file) return false;
+        _setPastedImage(node, file).catch(console.warn);
+        return true;
+    };
+
+    // Legacy paste hook (older ComfyUI frontend versions)
+    node.onPasteFile = function (...args) {
+        const file = _extractImageFile(args);
+        if (!file) return false;
+        _setPastedImage(node, file).catch(console.warn);
+        return true;
+    };
+
+    // Primary paste hook (current ComfyUI — called by usePaste.ts)
+    node.pasteFile = function (file) {
+        if (!_isImageFile(file)) return;
+        _setPastedImage(node, file).catch(console.warn);
+    };
+
+    // Multi-file paste variant
+    node.pasteFiles = function (files) {
+        const file = Array.isArray(files) ? files.find(_isImageFile) : null;
+        if (!file) return;
+        _setPastedImage(node, file).catch(console.warn);
+    };
+}
+
+// ─── Upload & preview helpers ─────────────────────────────────────────────────
+
+async function _setPastedImage(node, file) {
+    if (!_isImageFile(file)) return false;
+
+    // Dedup guard: onDragDrop + pasteFile + onPasteFile may all fire at once
+    const key = `${file.name}:${file.size}:${file.lastModified}`;
+    if (node._pasteDedupeKey === key) return false;
+    node._pasteDedupeKey = key;
+    setTimeout(() => { if (node._pasteDedupeKey === key) node._pasteDedupeKey = null; }, 1000);
+
+    const uploadedName = await _uploadImage(file);
+
+    // Update hidden pasted_image widget
+    const piw = node.widgets?.find(w => w.name === "pasted_image");
+    if (!piw) throw new Error("pasted_image widget not found");
+    const values = piw.options?.values;
+    if (Array.isArray(values) && !values.includes(uploadedName)) values.push(uploadedName);
+    piw.value = uploadedName;
+    piw.callback?.(uploadedName);
+
+    // Show preview immediately — no need to run the node first
+    _showDroppedPreview(node, uploadedName);
+    node.setDirtyCanvas(true, true);
+    return true;
+}
+
+async function _uploadImage(file) {
+    // Clipboard paste produces a generic "image.png" — route it to pasted/
+    const isPasted =
+        file?.name === "image.png" &&
+        typeof file?.lastModified === "number" &&
+        Math.abs(file.lastModified - Date.now()) < 2000;
+
+    const body = new FormData();
+    body.append("image", file, file.name || "pasted_image.png");
+    body.append("type", "input");
+    body.append("overwrite", "false");
+    if (isPasted) body.append("subfolder", "pasted");
+
+    const res = await app.api.fetchApi("/upload/image", { method: "POST", body });
+    if (!res?.ok) throw new Error(`Upload failed (${res?.status})`);
+    const payload = await res.json();
+    if (payload?.subfolder) return `${payload.subfolder}/${payload.name || payload.filename || file.name}`;
+    return payload?.name || payload?.filename || file.name;
+}
+
+function _showDroppedPreview(node, uploadedPath) {
+    const ix        = uploadedPath.lastIndexOf("/");
+    const subfolder = ix === -1 ? "" : uploadedPath.slice(0, ix);
+    const filename  = ix === -1 ? uploadedPath : uploadedPath.slice(ix + 1);
+
+    const params = new URLSearchParams({
+        filename, type: "input", subfolder, rand: String(Date.now()),
+    });
+
+    const img = new Image();
+    img.onload = () => {
+        node._persp.img       = img;
+        node._persp.imgLoaded = true;
+
+        // Reset corner points for the new image
+        node._persp.points = [];
+        _syncWidget(node);
+
+        // Resize node to match new image aspect ratio
+        const nodeW    = node.size[0];
+        const previewW = nodeW - PREVIEW_PAD_X * 2;
+        const previewH = Math.round(previewW * img.naturalHeight / img.naturalWidth);
+        const wh       = _widgetAreaH(node);
+        node.size[1]   = wh + PREVIEW_PAD_TOP + Math.max(previewH, 100) + BOTTOM_MARGIN;
+
+        node.setDirtyCanvas(true, true);
+    };
+    img.onerror = () => console.warn("[PerspCorrection] dropped image preview failed to load");
+    img.src = app.api.apiURL(`/view?${params.toString()}`);
+}
+
+// ─── File-type utilities ──────────────────────────────────────────────────────
+
+function _isImageFile(file) {
+    if (!file) return false;
+    if (typeof file.type === "string" && file.type.startsWith("image/")) return true;
+    return /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(String(file.name || ""));
+}
+
+function _hasFileItems(e) {
+    const items = e?.dataTransfer?.items;
+    if (!items) return false;
+    for (const item of items) { if (item?.kind === "file") return true; }
+    return false;
+}
+
+function _extractImageFile(args) {
+    for (const a of args) {
+        if (!a) continue;
+        if (_isImageFile(a)) return a;
+        if (Array.isArray(a)) { const f = a.find(_isImageFile); if (f) return f; }
+        if (typeof FileList !== "undefined" && a instanceof FileList) {
+            for (const f of a) if (_isImageFile(f)) return f;
+        }
+        const dtFiles = a?.dataTransfer?.files;
+        if (dtFiles?.length) { for (const f of dtFiles) if (_isImageFile(f)) return f; }
+        const dtItems = a?.dataTransfer?.items;
+        if (dtItems?.length) {
+            for (const item of dtItems) {
+                const f = item?.kind === "file" ? item.getAsFile?.() : null;
+                if (f && _isImageFile(f)) return f;
+            }
+        }
+        const clipFiles = a?.clipboardData?.files;
+        if (clipFiles?.length) { for (const f of clipFiles) if (_isImageFile(f)) return f; }
+    }
+    return null;
+}
+
 // ─── Per-instance mouse handler binding ──────────────────────────────────────
-// Must be instance-level (not prototype) so LiteGraph finds them reliably.
-// Uses e.canvasX / e.canvasY (graph-space) minus node.pos, matching how the
-// reference DragCrop node handles coordinates.
 
 function _bindMouseHandlers(node) {
 
@@ -214,7 +414,6 @@ function _bindMouseHandlers(node) {
         const state   = this._persp;
         const preview = _previewArea(this);
 
-        // Convert canvas-space → node-body-space
         const lx = e.canvasX - this.pos[0];
         const ly = e.canvasY - this.pos[1];
 
@@ -239,7 +438,7 @@ function _bindMouseHandlers(node) {
         const hit = _nearestPoint(state.points, localX, localY, preview, HIT_R);
         if (hit >= 0) {
             state.draggingIdx = hit;
-            return true;   // capture mouse for drag
+            return true;
         }
 
         // Left-click on empty space → add point (max 4)
@@ -263,14 +462,12 @@ function _bindMouseHandlers(node) {
         const localX = lx - preview.x;
         const localY = ly - preview.y;
 
-        // Hover highlight
         const hover = _nearestPoint(state.points, localX, localY, preview, HIT_R * 1.4);
         if (hover !== state.hoverIdx) {
             state.hoverIdx = hover;
             this.setDirtyCanvas(true);
         }
 
-        // Drag active point
         if (state.draggingIdx >= 0) {
             const cx = Math.max(0, Math.min(preview.w, localX));
             const cy = Math.max(0, Math.min(preview.h, localY));
@@ -304,7 +501,6 @@ function _bindMouseHandlers(node) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Preview rectangle in node-body-local coordinates (origin = body top-left). */
 function _previewArea(node) {
     const wh = _widgetAreaH(node);
     const x  = PREVIEW_PAD_X;
@@ -314,13 +510,11 @@ function _previewArea(node) {
     return { x, y, w, h };
 }
 
-/** Sum of heights of all visible (non-hidden) widget rows. */
 function _widgetAreaH(node) {
     let h = 4;
     for (const w of (node.widgets ?? [])) {
         if (!w) continue;
         if (w.type === "hidden" || w.hidden === true) continue;
-        // computeSize may or may not exist; fall back to a sensible constant
         let wh;
         try { wh = w.computeSize?.(node.size?.[0] ?? DEFAULT_W)?.[1]; }
         catch { wh = undefined; }
@@ -342,7 +536,6 @@ function _toCanvas(norm, preview) {
     return { x: preview.x + norm.x * preview.w, y: preview.y + norm.y * preview.h };
 }
 
-/** Return index of nearest point within threshold, or -1. */
 function _nearestPoint(points, localX, localY, preview, threshold) {
     let bestIdx  = -1;
     let bestDist = threshold;
@@ -356,7 +549,6 @@ function _nearestPoint(points, localX, localY, preview, threshold) {
     return bestIdx;
 }
 
-/** Serialise the current points array into the hidden corner_points widget. */
 function _syncWidget(node) {
     const w = node.widgets?.find(w => w.name === "corner_points");
     if (w) w.value = JSON.stringify(node._persp.points.map(p => [p.x, p.y]));

@@ -10,6 +10,7 @@ from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 import math
 import os
 import json
+import hashlib
 import folder_paths
 from PIL import Image as PILImage
 
@@ -893,6 +894,36 @@ class UpscaleImageToTotalPixels:
         return (samples,)
 
 
+# ── PerspectiveCorrectionNode: cross-run image-source tracking ────────────────
+_persp_last_wire_hashes: dict = {}  # node_id → sha256 of wired tensor from last run
+_persp_last_pasted_images: dict = {}  # node_id → pasted_image filename from last run
+
+
+def _persp_hash_tensor(image) -> str:
+    """Stable SHA-256 fingerprint of a (B,H,W,C) float32 IMAGE tensor."""
+    try:
+        arr = image.detach().cpu().numpy()
+        arr_u8 = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        h = hashlib.sha256()
+        h.update(str(arr_u8.shape).encode())
+        h.update(arr_u8.tobytes())
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def _persp_load_tensor(image_name: str):
+    """Load a pasted/dropped image filename into a Comfy IMAGE tensor (1,H,W,C)."""
+    try:
+        image_path = folder_paths.get_annotated_filepath(image_name)
+        pil = PILImage.open(image_path).convert("RGB")
+        arr = np.array(pil).astype(np.float32) / 255.0
+        return torch.from_numpy(arr)[None,]
+    except Exception as e:
+        print(f"PerspectiveCorrectionNode: Could not load pasted image: {e}")
+        return None
+
+
 class PerspectiveCorrectionNode:
     """
     Corrects the perspective of a quadrilateral region in an image.
@@ -902,22 +933,77 @@ class PerspectiveCorrectionNode:
 
     @classmethod
     def INPUT_TYPES(s):
+        input_dir = folder_paths.get_input_directory()
+        files = [
+            f
+            for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f))
+        ]
+        files = folder_paths.filter_files_content_types(files, ["image"])
         return {
             "required": {
-                "image": ("IMAGE",),
                 "corner_points": ("STRING", {"default": "[]", "multiline": False}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "pasted_image": ([""] + sorted(files), {"image_upload": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, pasted_image=None, **kwargs):
+        if pasted_image and pasted_image != "":
+            try:
+                fp = folder_paths.get_annotated_filepath(pasted_image)
+                if not os.path.isfile(fp):
+                    return f"pasted_image file not found: {pasted_image}"
+            except Exception as e:
+                return f"Invalid pasted_image path '{pasted_image}': {e}"
+        return True
+
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "correct_perspective"
     CATEGORY = "image/transform"
 
-    def correct_perspective(self, image, corner_points="[]", unique_id=None):
+    def correct_perspective(
+        self, corner_points="[]", image=None, pasted_image="", unique_id=None
+    ):
+        # ── Resolve the image source (wire vs paste/drop) ──────────────────────
+        nid = str(unique_id) if unique_id is not None else "__unknown__"
+        wire_hash = _persp_hash_tensor(image) if image is not None else ""
+        last_wire = _persp_last_wire_hashes.get(nid)
+        last_pasted = _persp_last_pasted_images.get(nid, "")
+
+        pasted_fresh = bool(pasted_image) and (pasted_image != last_pasted)
+        wire_changed = image is not None and (wire_hash != last_wire)
+        clear_pasted_on_frontend = False
+
+        if not pasted_image:
+            source_image = image
+        elif pasted_fresh:
+            source_image = _persp_load_tensor(pasted_image) or image
+        elif wire_changed:
+            source_image = image
+            clear_pasted_on_frontend = True
+        else:
+            source_image = _persp_load_tensor(pasted_image) or image
+
+        if source_image is None:
+            raise ValueError(
+                "PerspectiveCorrectionNode requires either a wired IMAGE input "
+                "or a dropped/pasted image."
+            )
+
+        _persp_last_wire_hashes[nid] = wire_hash
+        _persp_last_pasted_images[nid] = (
+            "" if clear_pasted_on_frontend else pasted_image
+        )
+
+        image = source_image
         # Parse the 4 corner points (normalized [0,1] coords stored by the JS frontend)
         try:
             raw = json.loads(corner_points)
@@ -945,6 +1031,8 @@ class PerspectiveCorrectionNode:
         ui_out = {}
         if preview_img_info:
             ui_out["images"] = [preview_img_info]
+        if clear_pasted_on_frontend:
+            ui_out["clear_pasted_image"] = True
 
         # Need exactly 4 points to perform the warp; otherwise pass through
         if len(points) != 4:
