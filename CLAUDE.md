@@ -6,7 +6,6 @@
 Comfynodes/
 ├── nodes.py          # ALL node classes live here (single file)
 ├── __init__.py       # Re-exports from nodes.py only — do not modify
-├── web/              # JavaScript frontend extensions (one .js per node that needs UI)
 ├── requirements.txt  # pip dependencies (opencv-python, numpy, mediapipe)
 └── CLAUDE.md
 ```
@@ -52,8 +51,6 @@ import numpy as np
 import cv2
 import comfy.model_management
 import comfy.utils
-import folder_paths
-from PIL import Image as PILImage
 ```
 
 ## Image Tensor Convention
@@ -72,14 +69,20 @@ out = torch.from_numpy(np_img.astype(np.float32) / 255.0).unsqueeze(0)  # 1×H×
 
 ## JavaScript Frontend
 
-- Files in `web/` are loaded automatically (WEB_DIRECTORY = "./web" in nodes.py)
-- Import app: `import { app } from "../../scripts/app.js";`
-- Register with: `app.registerExtension({ name: "comfynodes.<extension_name>", ... })`
-- See `web/perspective_correction.js` for a full interactive canvas node example
+To add a JS frontend to a node:
+
+1. Create `web/` directory and add `WEB_DIRECTORY = "./web"` to `nodes.py`
+2. Export `WEB_DIRECTORY` from `__init__.py`
+3. Add `web/<NodeName>.js` — all `.js` files in `web/` are loaded automatically
+
+```javascript
+import { app } from "../../scripts/app.js";
+app.registerExtension({ name: "comfynodes.<extension_name>", ... });
+```
 
 ## Before Committing
 
-Alwais make sure commit is not done on main branch. Create branch if needed.
+Always make sure commit is not done on main branch. Create branch if needed.
 
 ```bash
 uv run black nodes.py
