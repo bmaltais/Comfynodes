@@ -8,6 +8,12 @@ import comfy.model_management
 import comfy.utils
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 import math
+import os
+import json
+import folder_paths
+from PIL import Image as PILImage
+
+WEB_DIRECTORY = "./web"
 
 # Attempt to import MAX_RESOLUTION from ComfyUI's samplers, with a fallback for safety.
 try:
@@ -15,11 +21,13 @@ try:
 except ImportError:
     MAX_RESOLUTION = 8192
 
+
 class AnalogFilmNoiseNode:
     """
     Applies analog film-style noise to an image. This effect simulates the grain
     found in traditional photographic film.
     """
+
     def __init__(self):
         pass
 
@@ -32,8 +40,14 @@ class AnalogFilmNoiseNode:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "intensity": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "grain_size": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "intensity": (
+                    "FLOAT",
+                    {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "grain_size": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1},
+                ),
                 "monochrome": ("BOOLEAN", {"default": True}),
             },
         }
@@ -44,7 +58,9 @@ class AnalogFilmNoiseNode:
     CATEGORY = "Image/Effects"
     OUTPUT_NODE = False
 
-    def apply_film_noise(self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool):
+    def apply_film_noise(
+        self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool
+    ):
         """
         Adds film grain to the input image.
 
@@ -77,15 +93,21 @@ class AnalogFilmNoiseNode:
             # Generate noise map
             if monochrome:
                 # Generate single-channel noise and replicate it across all channels for grayscale grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, 1))
+                noise_map_small = np.random.normal(
+                    loc=0.0, scale=1.0, size=(noise_height, noise_width, 1)
+                )
             else:
                 # Generate independent noise for each channel for color grain
-                noise_map_small = np.random.normal(loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels))
+                noise_map_small = np.random.normal(
+                    loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels)
+                )
 
             # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
             if grain_size != 1.0 and grain_size >= 1:
                 # Use np.kron for a fast nearest-neighbor style upscale
-                noise_map_resized = np.kron(noise_map_small, np.ones((int(grain_size), int(grain_size), 1)))
+                noise_map_resized = np.kron(
+                    noise_map_small, np.ones((int(grain_size), int(grain_size), 1))
+                )
             else:
                 noise_map_resized = noise_map_small
 
@@ -97,7 +119,9 @@ class AnalogFilmNoiseNode:
                 noise_map_full = np.repeat(noise_map_full, num_channels, axis=2)
             elif noise_map_full.shape[2] != num_channels:
                 # Fallback to ensure channel count matches
-                noise_map_full = np.repeat(noise_map_full[:, :, 0:1], num_channels, axis=2)
+                noise_map_full = np.repeat(
+                    noise_map_full[:, :, 0:1], num_channels, axis=2
+                )
 
             # Calibrate and apply noise
             # Center the noise distribution and scale by intensity
@@ -114,6 +138,7 @@ class ClearGpuMemoryCache:
     A node to clear the GPU's memory cache, freeing up VRAM. It can be used
     to manage memory in complex workflows.
     """
+
     def __init__(self):
         pass
 
@@ -164,29 +189,30 @@ def rgb2hsl_torch(rgb: torch.Tensor) -> torch.Tensor:
     hsl_h[cmax_idx == 0] = (((rgb[:, 1:2] - rgb[:, 2:3]) / delta) % 6)[cmax_idx == 0]
     hsl_h[cmax_idx == 1] = (((rgb[:, 2:3] - rgb[:, 0:1]) / delta) + 2)[cmax_idx == 1]
     hsl_h[cmax_idx == 2] = (((rgb[:, 0:1] - rgb[:, 1:2]) / delta) + 4)[cmax_idx == 2]
-    hsl_h[cmax_idx == 3] = 0.
-    hsl_h /= 6.
+    hsl_h[cmax_idx == 3] = 0.0
+    hsl_h /= 6.0
 
-    hsl_l = (cmax + cmin) / 2.
+    hsl_l = (cmax + cmin) / 2.0
     hsl_s = torch.empty_like(hsl_h)
     hsl_s[hsl_l == 0] = 0
     hsl_s[hsl_l == 1] = 0
     hsl_l_ma = torch.bitwise_and(hsl_l > 0, hsl_l < 1)
     hsl_l_s0_5 = torch.bitwise_and(hsl_l_ma, hsl_l <= 0.5)
     hsl_l_l0_5 = torch.bitwise_and(hsl_l_ma, hsl_l > 0.5)
-    hsl_s[hsl_l_s0_5] = ((cmax - cmin) / (hsl_l * 2.))[hsl_l_s0_5]
-    hsl_s[hsl_l_l0_5] = ((cmax - cmin) / (- hsl_l * 2. + 2.))[hsl_l_l0_5]
+    hsl_s[hsl_l_s0_5] = ((cmax - cmin) / (hsl_l * 2.0))[hsl_l_s0_5]
+    hsl_s[hsl_l_l0_5] = ((cmax - cmin) / (-hsl_l * 2.0 + 2.0))[hsl_l_l0_5]
 
     hsl = torch.cat([hsl_h, hsl_s, hsl_l], dim=1)
     return hsl.permute(0, 2, 3, 1)
 
+
 def hsl2rgb_torch(hsl: torch.Tensor) -> torch.Tensor:
     hsl = hsl.permute(0, 3, 1, 2)
     hsl_h, hsl_s, hsl_l = hsl[:, 0:1], hsl[:, 1:2], hsl[:, 2:3]
-    _c = (-torch.abs(hsl_l * 2. - 1.) + 1) * hsl_s
-    _x = _c * (-torch.abs(hsl_h * 6. % 2. - 1) + 1.)
-    _m = hsl_l - _c / 2.
-    idx = (hsl_h * 6.).type(torch.uint8)
+    _c = (-torch.abs(hsl_l * 2.0 - 1.0) + 1) * hsl_s
+    _x = _c * (-torch.abs(hsl_h * 6.0 % 2.0 - 1) + 1.0)
+    _m = hsl_l - _c / 2.0
+    idx = (hsl_h * 6.0).type(torch.uint8)
     idx = (idx % 6).expand(-1, 3, -1, -1)
     rgb = torch.empty_like(hsl)
     _o = torch.zeros_like(_c)
@@ -206,10 +232,27 @@ class ImageMergeNode:
     """
 
     blend_modes = [
-        "Normal", "Multiply", "Screen", "Overlay", "Soft Light", "Color", "Darken",
-        "Color Burn", "Linear Burn", "Lighten", "Color Dodge", "Linear Dodge (Add)",
-        "Hard Light", "Vivid Light", "Linear Light", "Pin Light", "Hard Mix",
-        "Difference", "Exclusion", "Subtract", "Divide"
+        "Normal",
+        "Multiply",
+        "Screen",
+        "Overlay",
+        "Soft Light",
+        "Color",
+        "Darken",
+        "Color Burn",
+        "Linear Burn",
+        "Lighten",
+        "Color Dodge",
+        "Linear Dodge (Add)",
+        "Hard Light",
+        "Vivid Light",
+        "Linear Light",
+        "Pin Light",
+        "Hard Mix",
+        "Difference",
+        "Exclusion",
+        "Subtract",
+        "Divide",
     ]
 
     @classmethod
@@ -222,7 +265,10 @@ class ImageMergeNode:
                 "original_image": ("IMAGE",),
                 "updated_image": ("IMAGE",),
                 "blending_mode": (cls.blend_modes,),
-                "mixing_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "mixing_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
                 "enable_alignment": ("BOOLEAN", {"default": False}),
                 "enable_facial_correction": ("BOOLEAN", {"default": False}),
             }
@@ -242,7 +288,9 @@ class ImageMergeNode:
         np_image = cv2.cvtColor(np_image, cv2.COLOR_BGR2RGB)
         return torch.from_numpy(np_image.astype(np.float32) / 255.0).unsqueeze(0)
 
-    def _align_images(self, original_cv2: np.ndarray, updated_cv2: np.ndarray) -> np.ndarray:
+    def _align_images(
+        self, original_cv2: np.ndarray, updated_cv2: np.ndarray
+    ) -> np.ndarray:
         """Aligns the updated image to the original image using feature matching to find the translation."""
         try:
             orb = cv2.ORB_create(nfeatures=1500)
@@ -250,29 +298,45 @@ class ImageMergeNode:
             kp2, des2 = orb.detectAndCompute(updated_cv2, None)
 
             if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
-                print("ImageMergeNode: Not enough descriptors to align. Skipping alignment.")
+                print(
+                    "ImageMergeNode: Not enough descriptors to align. Skipping alignment."
+                )
                 return updated_cv2
 
             bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
             matches = bf.match(des1, des2)
             matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = matches[:max(20, int(len(matches) * 0.20))]
+            good_matches = matches[: max(20, int(len(matches) * 0.20))]
 
             if len(good_matches) < 10:
-                print("ImageMergeNode: Not enough good matches to find translation. Skipping alignment.")
+                print(
+                    "ImageMergeNode: Not enough good matches to find translation. Skipping alignment."
+                )
                 return updated_cv2
 
-            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
-            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
+            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(
+                -1, 2
+            )
+            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(
+                -1, 2
+            )
 
             M, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
 
             if M is None:
-                print("ImageMergeNode: Could not compute homography. Skipping alignment.")
+                print(
+                    "ImageMergeNode: Could not compute homography. Skipping alignment."
+                )
                 return updated_cv2
 
             h, w = original_cv2.shape[:2]
-            aligned_updated_cv2 = cv2.warpPerspective(updated_cv2, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+            aligned_updated_cv2 = cv2.warpPerspective(
+                updated_cv2,
+                M,
+                (w, h),
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0, 0),
+            )
 
             print(f"ImageMergeNode: Aligned image with perspective transformation.")
             return aligned_updated_cv2
@@ -288,7 +352,10 @@ class ImageMergeNode:
         all_landmarks = []
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
-                landmarks = np.array([(lm.x * w, lm.y * h) for lm in face_landmarks.landmark], dtype=np.float32)
+                landmarks = np.array(
+                    [(lm.x * w, lm.y * h) for lm in face_landmarks.landmark],
+                    dtype=np.float32,
+                )
                 all_landmarks.append(landmarks)
         return all_landmarks
 
@@ -296,62 +363,97 @@ class ImageMergeNode:
         """Finds and warps faces from the updated image to match the original image."""
         try:
             mp_face_mesh = mp.solutions.face_mesh
-            with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5) as face_mesh:
-                original_landmarks_list = self._get_facial_landmarks(original_cv2, face_mesh)
-                updated_landmarks_list = self._get_facial_landmarks(updated_cv2, face_mesh)
+            with mp_face_mesh.FaceMesh(
+                static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5
+            ) as face_mesh:
+                original_landmarks_list = self._get_facial_landmarks(
+                    original_cv2, face_mesh
+                )
+                updated_landmarks_list = self._get_facial_landmarks(
+                    updated_cv2, face_mesh
+                )
 
                 if not original_landmarks_list or not updated_landmarks_list:
-                    print("ImageMergeNode: No faces detected in one or both images. Skipping facial correction.")
+                    print(
+                        "ImageMergeNode: No faces detected in one or both images. Skipping facial correction."
+                    )
                     return updated_cv2
 
-                print(f"ImageMergeNode: Found {len(original_landmarks_list)} face(s) in original and {len(updated_landmarks_list)} in updated.")
+                print(
+                    f"ImageMergeNode: Found {len(original_landmarks_list)} face(s) in original and {len(updated_landmarks_list)} in updated."
+                )
 
                 final_image = updated_cv2.copy()
 
                 # Use a comprehensive set of landmarks for detailed warping
-                key_landmarks_indices = list(itertools.chain(
-                    *mp.solutions.face_mesh.FACEMESH_LIPS,
-                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYE,
-                    *mp.solutions.face_mesh.FACEMESH_LEFT_EYEBROW,
-                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYE,
-                    *mp.solutions.face_mesh.FACEMESH_RIGHT_EYEBROW,
-                    *mp.solutions.face_mesh.FACEMESH_FACE_OVAL,
-                ))
-                if hasattr(mp.solutions.face_mesh, 'FACEMESH_NOSE'):
-                    key_landmarks_indices += list(itertools.chain(*mp.solutions.face_mesh.FACEMESH_NOSE))
+                key_landmarks_indices = list(
+                    itertools.chain(
+                        *mp.solutions.face_mesh.FACEMESH_LIPS,
+                        *mp.solutions.face_mesh.FACEMESH_LEFT_EYE,
+                        *mp.solutions.face_mesh.FACEMESH_LEFT_EYEBROW,
+                        *mp.solutions.face_mesh.FACEMESH_RIGHT_EYE,
+                        *mp.solutions.face_mesh.FACEMESH_RIGHT_EYEBROW,
+                        *mp.solutions.face_mesh.FACEMESH_FACE_OVAL,
+                    )
+                )
+                if hasattr(mp.solutions.face_mesh, "FACEMESH_NOSE"):
+                    key_landmarks_indices += list(
+                        itertools.chain(*mp.solutions.face_mesh.FACEMESH_NOSE)
+                    )
 
                 key_landmarks_indices = sorted(list(set(key_landmarks_indices)))
 
                 # Match faces based on proximity
                 for i, updated_landmarks in enumerate(updated_landmarks_list):
                     updated_center = updated_landmarks.mean(axis=0)
-                    distances = [np.linalg.norm(updated_center - orig.mean(axis=0)) for orig in original_landmarks_list]
+                    distances = [
+                        np.linalg.norm(updated_center - orig.mean(axis=0))
+                        for orig in original_landmarks_list
+                    ]
                     best_match_idx = np.argmin(distances)
                     original_landmarks = original_landmarks_list[best_match_idx]
 
-                    print(f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original.")
+                    print(
+                        f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original."
+                    )
 
                     # Ensure we have enough landmarks for the detailed set
-                    if original_landmarks.shape[0] < max(key_landmarks_indices) + 1 or \
-                       updated_landmarks.shape[0] < max(key_landmarks_indices) + 1:
-                        print("ImageMergeNode: Not enough landmarks for detailed warping. Using all available.")
+                    if (
+                        original_landmarks.shape[0] < max(key_landmarks_indices) + 1
+                        or updated_landmarks.shape[0] < max(key_landmarks_indices) + 1
+                    ):
+                        print(
+                            "ImageMergeNode: Not enough landmarks for detailed warping. Using all available."
+                        )
                         source_pts = original_landmarks
                         target_pts = updated_landmarks
                     else:
-                        source_pts = np.array([original_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
-                        target_pts = np.array([updated_landmarks[j] for j in key_landmarks_indices], dtype=np.float32)
+                        source_pts = np.array(
+                            [original_landmarks[j] for j in key_landmarks_indices],
+                            dtype=np.float32,
+                        )
+                        target_pts = np.array(
+                            [updated_landmarks[j] for j in key_landmarks_indices],
+                            dtype=np.float32,
+                        )
 
                     tps = cv2.createThinPlateSplineShapeTransformer()
                     source_pts_reshaped = source_pts.reshape(1, -1, 2)
                     target_pts_reshaped = target_pts.reshape(1, -1, 2)
                     matches = [cv2.DMatch(i, i, 0) for i in range(len(source_pts))]
-                    tps.estimateTransformation(target_pts_reshaped, source_pts_reshaped, matches)
+                    tps.estimateTransformation(
+                        target_pts_reshaped, source_pts_reshaped, matches
+                    )
 
                     warped_updated_cv2 = tps.warpImage(updated_cv2)
 
                     # Create a mask for the face in the original image to blend
-                    hull_indices = cv2.convexHull(original_landmarks, returnPoints=False)
-                    hull_points = np.array([original_landmarks[i[0]] for i in hull_indices], dtype=np.int32)
+                    hull_indices = cv2.convexHull(
+                        original_landmarks, returnPoints=False
+                    )
+                    hull_points = np.array(
+                        [original_landmarks[i[0]] for i in hull_indices], dtype=np.int32
+                    )
 
                     mask = np.zeros(original_cv2.shape[:2], dtype=np.uint8)
                     cv2.fillConvexPoly(mask, hull_points, 255)
@@ -363,12 +465,16 @@ class ImageMergeNode:
                     r = cv2.boundingRect(hull_points)
                     center = (r[0] + r[2] // 2, r[1] + r[3] // 2)
 
-                    final_image = self._seamless_clone(warped_updated_cv2, final_image, mask, center)
+                    final_image = self._seamless_clone(
+                        warped_updated_cv2, final_image, mask, center
+                    )
 
                 return final_image
 
         except Exception as e:
-            print(f"ImageMergeNode: Error during facial correction: {e}. Skipping correction.")
+            print(
+                f"ImageMergeNode: Error during facial correction: {e}. Skipping correction."
+            )
             return updated_cv2
 
     def _seamless_clone(self, src, dst, mask, center):
@@ -376,74 +482,117 @@ class ImageMergeNode:
         try:
             return cv2.seamlessClone(src, dst, mask, center, cv2.NORMAL_CLONE)
         except Exception as e:
-            print(f"ImageMergeNode: Error during seamless cloning: {e}. Returning destination image.")
+            print(
+                f"ImageMergeNode: Error during seamless cloning: {e}. Returning destination image."
+            )
             return dst
 
-    def _blend_images_pytorch(self, base: torch.Tensor, blend: torch.Tensor, mode: str) -> torch.Tensor:
+    def _blend_images_pytorch(
+        self, base: torch.Tensor, blend: torch.Tensor, mode: str
+    ) -> torch.Tensor:
         """Applies a blending mode to two images using PyTorch."""
         if base.shape[1:3] != blend.shape[1:3]:
-            blend = torch.nn.functional.interpolate(blend.permute(0, 3, 1, 2), size=base.shape[1:3], mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+            blend = torch.nn.functional.interpolate(
+                blend.permute(0, 3, 1, 2),
+                size=base.shape[1:3],
+                mode="bilinear",
+                align_corners=False,
+            ).permute(0, 2, 3, 1)
 
         base_rgb = base[..., :3]
         blend_rgb = blend[..., :3]
 
-        if mode == 'Normal':
+        if mode == "Normal":
             result = blend_rgb
-        elif mode == 'Multiply':
+        elif mode == "Multiply":
             result = base_rgb * blend_rgb
-        elif mode == 'Screen':
+        elif mode == "Screen":
             result = 1 - (1 - base_rgb) * (1 - blend_rgb)
-        elif mode == 'Overlay':
-            result = torch.where(base_rgb <= 0.5, 2 * base_rgb * blend_rgb, 1 - 2 * (1 - base_rgb) * (1 - blend_rgb))
-        elif mode == 'Soft Light':
-            result = torch.where(blend_rgb <= 0.5, 2 * base_rgb * blend_rgb + base_rgb**2 * (1 - 2 * blend_rgb), 2 * base_rgb * (1 - blend_rgb) + torch.sqrt(base_rgb) * (2 * blend_rgb - 1))
-        elif mode == 'Hard Light':
-            result = torch.where(blend_rgb <= 0.5, 2 * base_rgb * blend_rgb, 1 - 2 * (1 - base_rgb) * (1 - blend_rgb))
-        elif mode == 'Color':
+        elif mode == "Overlay":
+            result = torch.where(
+                base_rgb <= 0.5,
+                2 * base_rgb * blend_rgb,
+                1 - 2 * (1 - base_rgb) * (1 - blend_rgb),
+            )
+        elif mode == "Soft Light":
+            result = torch.where(
+                blend_rgb <= 0.5,
+                2 * base_rgb * blend_rgb + base_rgb**2 * (1 - 2 * blend_rgb),
+                2 * base_rgb * (1 - blend_rgb)
+                + torch.sqrt(base_rgb) * (2 * blend_rgb - 1),
+            )
+        elif mode == "Hard Light":
+            result = torch.where(
+                blend_rgb <= 0.5,
+                2 * base_rgb * blend_rgb,
+                1 - 2 * (1 - base_rgb) * (1 - blend_rgb),
+            )
+        elif mode == "Color":
             base_hsl = rgb2hsl_torch(base_rgb)
             blend_hsl = rgb2hsl_torch(blend_rgb)
             result_hsl = torch.cat((blend_hsl[..., 0:2], base_hsl[..., 2:3]), dim=-1)
             result = hsl2rgb_torch(result_hsl)
-        elif mode == 'Darken':
+        elif mode == "Darken":
             result = torch.min(base_rgb, blend_rgb)
-        elif mode == 'Color Burn':
+        elif mode == "Color Burn":
             result = 1 - (1 - base_rgb) / (blend_rgb + 1e-6)
-        elif mode == 'Linear Burn':
+        elif mode == "Linear Burn":
             result = base_rgb + blend_rgb - 1
-        elif mode == 'Lighten':
+        elif mode == "Lighten":
             result = torch.max(base_rgb, blend_rgb)
-        elif mode == 'Color Dodge':
+        elif mode == "Color Dodge":
             result = base_rgb / (1 - blend_rgb + 1e-6)
-        elif mode == 'Linear Dodge (Add)':
+        elif mode == "Linear Dodge (Add)":
             result = base_rgb + blend_rgb
-        elif mode == 'Vivid Light':
-            result = torch.where(blend_rgb <= 0.5, 1 - (1 - base_rgb) / (2 * blend_rgb + 1e-6), base_rgb / (2 * (1 - blend_rgb) + 1e-6))
-        elif mode == 'Linear Light':
+        elif mode == "Vivid Light":
+            result = torch.where(
+                blend_rgb <= 0.5,
+                1 - (1 - base_rgb) / (2 * blend_rgb + 1e-6),
+                base_rgb / (2 * (1 - blend_rgb) + 1e-6),
+            )
+        elif mode == "Linear Light":
             result = base_rgb + 2 * blend_rgb - 1
-        elif mode == 'Pin Light':
-            result = torch.where(blend_rgb <= 0.5, torch.min(base_rgb, 2 * blend_rgb), torch.max(base_rgb, 2 * blend_rgb - 1))
-        elif mode == 'Hard Mix':
+        elif mode == "Pin Light":
+            result = torch.where(
+                blend_rgb <= 0.5,
+                torch.min(base_rgb, 2 * blend_rgb),
+                torch.max(base_rgb, 2 * blend_rgb - 1),
+            )
+        elif mode == "Hard Mix":
             result = torch.floor(base_rgb + blend_rgb)
-        elif mode == 'Difference':
+        elif mode == "Difference":
             result = torch.abs(base_rgb - blend_rgb)
-        elif mode == 'Exclusion':
+        elif mode == "Exclusion":
             result = base_rgb + blend_rgb - 2 * base_rgb * blend_rgb
-        elif mode == 'Subtract':
+        elif mode == "Subtract":
             result = base_rgb - blend_rgb
-        elif mode == 'Divide':
+        elif mode == "Divide":
             result = base_rgb / (blend_rgb + 1e-6)
         else:
             result = blend_rgb
 
         return torch.clamp(result, 0, 1)
 
-    def merge_images(self, original_image, updated_image, blending_mode, mixing_strength, enable_alignment, enable_facial_correction):
+    def merge_images(
+        self,
+        original_image,
+        updated_image,
+        blending_mode,
+        mixing_strength,
+        enable_alignment,
+        enable_facial_correction,
+    ):
         # The 'updated_image' is the one we want to modify to match the 'original_image'
         # The 'original_image' is the reference
 
         h, w = original_image.shape[1:3]
         if updated_image.shape[1:3] != (h, w):
-            updated_image = torch.nn.functional.interpolate(updated_image.permute(0, 3, 1, 2), size=(h, w), mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+            updated_image = torch.nn.functional.interpolate(
+                updated_image.permute(0, 3, 1, 2),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            ).permute(0, 2, 3, 1)
 
         base_tensor = updated_image
         blend_tensor = original_image
@@ -456,17 +605,25 @@ class ImageMergeNode:
 
             if enable_alignment:
                 print("ImageMergeNode: Performing global alignment on updated image.")
-                warped_and_aligned_cv2 = self._align_images(reference_image_cv2, warped_and_aligned_cv2)
+                warped_and_aligned_cv2 = self._align_images(
+                    reference_image_cv2, warped_and_aligned_cv2
+                )
 
             if enable_facial_correction:
                 print("ImageMergeNode: Performing facial correction on updated image.")
-                warped_and_aligned_cv2 = self._find_and_warp_faces(reference_image_cv2, warped_and_aligned_cv2)
+                warped_and_aligned_cv2 = self._find_and_warp_faces(
+                    reference_image_cv2, warped_and_aligned_cv2
+                )
 
             base_tensor = self._cv2_to_tensor(warped_and_aligned_cv2)
 
-        blended_tensor = self._blend_images_pytorch(base_tensor, blend_tensor, blending_mode)
+        blended_tensor = self._blend_images_pytorch(
+            base_tensor, blend_tensor, blending_mode
+        )
 
-        final_tensor = base_tensor * (1.0 - mixing_strength) + blended_tensor * mixing_strength
+        final_tensor = (
+            base_tensor * (1.0 - mixing_strength) + blended_tensor * mixing_strength
+        )
 
         return (final_tensor,)
 
@@ -476,6 +633,7 @@ class LatentByMegapixelsAndAspectRatio:
     Generates an empty latent image with dimensions calculated based on a target
     megapixel count and a specific aspect ratio.
     """
+
     def __init__(self):
         self.device = comfy.model_management.intermediate_device()
 
@@ -486,11 +644,28 @@ class LatentByMegapixelsAndAspectRatio:
         """
         return {
             "required": {
-                "target_megapixels": ("FLOAT", {"default": 1.0, "min": 0.0625, "max": (MAX_RESOLUTION*MAX_RESOLUTION)/(1024*1024), "step": 0.1}),
-                "aspect_ratio_width": ("INT", {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
-                "aspect_ratio_height": ("INT", {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1}),
+                "target_megapixels": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0625,
+                        "max": (MAX_RESOLUTION * MAX_RESOLUTION) / (1024 * 1024),
+                        "step": 0.1,
+                    },
+                ),
+                "aspect_ratio_width": (
+                    "INT",
+                    {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1},
+                ),
+                "aspect_ratio_height": (
+                    "INT",
+                    {"default": 1, "min": 1, "max": MAX_RESOLUTION, "step": 1},
+                ),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
-                "target_multiplier": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "target_multiplier": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1},
+                ),
             }
         }
 
@@ -499,7 +674,14 @@ class LatentByMegapixelsAndAspectRatio:
     FUNCTION = "generate"
     CATEGORY = "latent"
 
-    def generate(self, target_megapixels, aspect_ratio_width, aspect_ratio_height, batch_size=1, target_multiplier=1.0):
+    def generate(
+        self,
+        target_megapixels,
+        aspect_ratio_width,
+        aspect_ratio_height,
+        batch_size=1,
+        target_multiplier=1.0,
+    ):
         """
         Calculates dimensions from megapixels and aspect ratio, then creates an empty latent.
 
@@ -549,7 +731,9 @@ class LatentByMegapixelsAndAspectRatio:
 
         # Calculate target dimensions based on the multiplier
         target_width = max(min_pixel_dim, round((width * target_multiplier) / 8.0) * 8)
-        target_height = max(min_pixel_dim, round((height * target_multiplier) / 8.0) * 8)
+        target_height = max(
+            min_pixel_dim, round((height * target_multiplier) / 8.0) * 8
+        )
 
         # Cap target dimensions by MAX_RESOLUTION
         target_width = min(target_width, MAX_RESOLUTION)
@@ -558,12 +742,20 @@ class LatentByMegapixelsAndAspectRatio:
         # Create the empty latent tensor
         latent_width = width // 8
         latent_height = height // 8
-        latent = torch.zeros([batch_size, 4, latent_height, latent_width], device=self.device)
+        latent = torch.zeros(
+            [batch_size, 4, latent_height, latent_width], device=self.device
+        )
 
-        actual_megapixels = (width * height) / (1024*1024)
+        actual_megapixels = (width * height) / (1024 * 1024)
         ui_text = f"{width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"
 
-        return ({"samples": latent, "ui": {"text": ui_text}}, width, height, target_width, target_height)
+        return (
+            {"samples": latent, "ui": {"text": ui_text}},
+            width,
+            height,
+            target_width,
+            target_height,
+        )
 
 
 class UpscaleImageToTotalPixels:
@@ -571,6 +763,7 @@ class UpscaleImageToTotalPixels:
     Upscales an image to a target total pixel count using an upscaling model.
     If the image is already larger than the target, it's downscaled.
     """
+
     rescale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
 
     RETURN_TYPES = ("IMAGE",)
@@ -589,14 +782,28 @@ class UpscaleImageToTotalPixels:
             "required": {
                 "upscale_model": ("UPSCALE_MODEL",),
                 "image": ("IMAGE",),
-                "total_megapixels": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "total_megapixels": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.1, "max": 16.0, "step": 0.1},
+                ),
                 "rescale_method": (self.rescale_methods,),
                 "skip_model_upscale": ("BOOLEAN", {"default": False}),
-                "make_divisible_by": ("INT", {"default": 1, "min": 1, "max": 128, "step": 1}),
+                "make_divisible_by": (
+                    "INT",
+                    {"default": 1, "min": 1, "max": 128, "step": 1},
+                ),
             }
         }
 
-    def upscale(self, upscale_model, image, total_megapixels, rescale_method, skip_model_upscale, make_divisible_by):
+    def upscale(
+        self,
+        upscale_model,
+        image,
+        total_megapixels,
+        rescale_method,
+        skip_model_upscale,
+        make_divisible_by,
+    ):
         """
         Performs the upscaling or downscaling with optional divisibility constraints.
 
@@ -621,13 +828,17 @@ class UpscaleImageToTotalPixels:
         # --- Step 1: Initial Upscale (if necessary) ---
         if current_pixels < target_pixels:
             if not skip_model_upscale:
-                samples = self.__imageScaler.upscale(upscale_model, image)[0].movedim(-1, 1)
+                samples = self.__imageScaler.upscale(upscale_model, image)[0].movedim(
+                    -1, 1
+                )
             else:
                 # Scale up to the target pixel count using standard resampling
                 ratio = (target_pixels / current_pixels) ** 0.5
                 target_width = round(original_width * ratio)
                 target_height = round(original_height * ratio)
-                samples = comfy.utils.common_upscale(samples, target_width, target_height, rescale_method, "disabled")
+                samples = comfy.utils.common_upscale(
+                    samples, target_width, target_height, rescale_method, "disabled"
+                )
 
         # --- Step 2: Calculate Final Dimensions with Divisibility ---
         current_width = samples.shape[3]
@@ -674,10 +885,138 @@ class UpscaleImageToTotalPixels:
 
         # --- Step 3: Final Resize ---
         if final_width != current_width or final_height != current_height:
-            samples = comfy.utils.common_upscale(samples, final_width, final_height, rescale_method, "disabled")
+            samples = comfy.utils.common_upscale(
+                samples, final_width, final_height, rescale_method, "disabled"
+            )
 
         samples = samples.movedim(1, -1)
         return (samples,)
+
+
+class PerspectiveCorrectionNode:
+    """
+    Corrects the perspective of a quadrilateral region in an image.
+    The user picks 4 corner points interactively in the node preview,
+    and the node applies a perspective warp to produce a rectified output.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "corner_points": ("STRING", {"default": "[]", "multiline": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "correct_perspective"
+    CATEGORY = "image/transform"
+
+    def correct_perspective(self, image, corner_points="[]", unique_id=None):
+        # Parse the 4 corner points (normalized [0,1] coords stored by the JS frontend)
+        try:
+            raw = json.loads(corner_points)
+            points = [[float(p[0]), float(p[1])] for p in raw if len(p) == 2]
+        except Exception:
+            points = []
+
+        # Save the input image as a preview so the JS frontend can display it
+        preview_img_info = None
+        try:
+            img_np_preview = (image[0].cpu().numpy() * 255).astype(np.uint8)
+            pil_preview = PILImage.fromarray(img_np_preview)
+            temp_dir = folder_paths.get_temp_directory()
+            uid = str(unique_id) if unique_id is not None else "0"
+            preview_fname = f"persp_{uid}_{image.shape[2]}x{image.shape[1]}.png"
+            pil_preview.save(os.path.join(temp_dir, preview_fname))
+            preview_img_info = {
+                "filename": preview_fname,
+                "subfolder": "",
+                "type": "temp",
+            }
+        except Exception as e:
+            print(f"PerspectiveCorrectionNode: Could not save preview image: {e}")
+
+        ui_out = {}
+        if preview_img_info:
+            ui_out["images"] = [preview_img_info]
+
+        # Need exactly 4 points to perform the warp; otherwise pass through
+        if len(points) != 4:
+            return {"ui": ui_out, "result": (image,)}
+
+        results = []
+        for i in range(image.shape[0]):
+            img_np = (image[i].cpu().numpy() * 255).astype(np.uint8)
+            h, w = img_np.shape[:2]
+
+            # Convert normalised coordinates to pixel coordinates
+            raw_pts = np.float32([[p[0] * w, p[1] * h] for p in points])
+
+            # Sort the 4 points into TL, TR, BR, BL order:
+            #   TL has the smallest x+y sum
+            #   BR has the largest x+y sum
+            #   TR has the smallest y-x difference
+            #   BL has the largest y-x difference
+            s = raw_pts.sum(axis=1)
+            d = raw_pts[:, 1] - raw_pts[:, 0]
+            tl = raw_pts[np.argmin(s)]
+            br = raw_pts[np.argmax(s)]
+            tr = raw_pts[np.argmin(d)]
+            bl = raw_pts[np.argmax(d)]
+            src_pts = np.float32([tl, tr, br, bl])
+
+            # Output dimensions: max of the two opposing side lengths preserves detail
+            out_w = max(
+                1,
+                int(
+                    max(
+                        np.linalg.norm(tr - tl),
+                        np.linalg.norm(br - bl),
+                    )
+                ),
+            )
+            out_h = max(
+                1,
+                int(
+                    max(
+                        np.linalg.norm(bl - tl),
+                        np.linalg.norm(br - tr),
+                    )
+                ),
+            )
+
+            dst_pts = np.float32(
+                [
+                    [0, 0],
+                    [out_w - 1, 0],
+                    [out_w - 1, out_h - 1],
+                    [0, out_h - 1],
+                ]
+            )
+
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            warped = cv2.warpPerspective(img_np, M, (out_w, out_h))
+            results.append(torch.from_numpy(warped.astype(np.float32) / 255.0))
+
+        if not results:
+            return {"ui": ui_out, "result": (image,)}
+
+        if len(results) == 1:
+            output = results[0].unsqueeze(0)
+        else:
+            h0, w0 = results[0].shape[:2]
+            if all(r.shape[:2] == (h0, w0) for r in results):
+                output = torch.stack(results)
+            else:
+                output = results[0].unsqueeze(0)
+
+        return {"ui": ui_out, "result": (output,)}
 
 
 NODE_CLASS_MAPPINGS = {
@@ -685,7 +1024,8 @@ NODE_CLASS_MAPPINGS = {
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
-    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels
+    "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels,
+    "PerspectiveCorrectionNode": PerspectiveCorrectionNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -693,5 +1033,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ClearGpuMemoryCache": "🧹 Clear GPU Memory Cache",
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
-    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels"
+    "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels",
+    "PerspectiveCorrectionNode": "Perspective Correction",
 }
