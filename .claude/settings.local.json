@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes log --oneline -20)",
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes diff --stat HEAD~1 HEAD)",
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes status)",
+      "Bash(uv run black nodes.py)",
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes diff __init__.py)",
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes diff nodes.py)",
+      "Bash(git -C /f/ComfyUI/custom_nodes/Comfynodes add nodes.py __init__.py web/ CLAUDE.md)",
+      "Bash(git -C:*)",
+      "Read(//c/Users/berna/**)",
+      "Bash(grep -n \"app\\\\.api\" web/*.js)",
+      "Bash(xargs -I {} cat \"C:\\\\Users\\\\berna\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\f--ComfyUI-custom-nodes-Comfynodes\\\\tasks\\\\{}\")"
+    ]
+  }
+}

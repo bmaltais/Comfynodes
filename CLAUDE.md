@@ -79,6 +79,8 @@ out = torch.from_numpy(np_img.astype(np.float32) / 255.0).unsqueeze(0)  # 1×H×
 
 ## Before Committing
 
+Alwais make sure commit is not done on main branch. Create branch if needed.
+
 ```bash
 uv run black nodes.py
 ```
