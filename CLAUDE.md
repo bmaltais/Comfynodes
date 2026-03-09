@@ -1,5 +1,17 @@
 # CLAUDE.md — Comfynodes
 
+## NEVER COMMIT DIRECTLY TO MAIN
+
+Always create a feature branch before making any changes:
+
+```bash
+git checkout -b <branch-name>
+```
+
+Commit and push on the branch. Open a PR to merge into main.
+
+---
+
 ## Project Structure
 
 ```
