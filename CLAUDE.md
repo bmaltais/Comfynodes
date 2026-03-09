@@ -80,25 +80,41 @@ import { app } from "../../scripts/app.js";
 app.registerExtension({ name: "comfynodes.<extension_name>", ... });
 ```
 
-## Before Committing
+## Before Starting Any Work
 
-Always make sure commit is not done on main branch. Create branch if needed.
+**Step 0 — always create a feature branch first. Never work on main.**
+
+```bash
+git checkout -b <branch-name>
+```
+
+Check you are not on main:
+
+```bash
+git branch --show-current   # must NOT be "main"
+```
+
+## Before Committing
 
 ```bash
 uv run black nodes.py
 ```
 
 Install black if needed:
+
 ```bash
 uv pip install black
 ```
 
 ## Testing a Node
 
+Do this **before committing** any new or changed node — do not skip:
+
 1. Restart ComfyUI (or use the Manager's "Reload Custom Nodes" if available)
 2. Open browser DevTools console — check for JS errors on load
 3. Search for the node by display name in the ComfyUI node menu
 4. Connect inputs, run the workflow, check the ComfyUI terminal for Python errors
+5. Confirm the node produces correct output before committing
 
 ## Dependencies
 
