@@ -65,13 +65,14 @@ class AnalogFilmNoiseNode:
         seed: int,
     ):
         """
-        Adds film grain to the input image.
+        Adds film grain to the input image using vectorized PyTorch operations.
 
         Args:
-            image (torch.Tensor): The input image tensor.
+            image (torch.Tensor): The input image tensor in (B, H, W, C) format.
             intensity (float): The strength of the noise effect.
             grain_size (float): The size of the noise grain. Larger values create coarser grain.
             monochrome (bool): If True, applies grayscale noise; otherwise, applies color noise.
+            seed (int): Seed for deterministic noise generation.
 
         Returns:
             (torch.Tensor,): A tuple containing the image tensor with added noise.
@@ -79,62 +80,57 @@ class AnalogFilmNoiseNode:
         if intensity == 0:
             return (image,)
 
+        device = image.device
         batch_size, original_height, original_width, num_channels = image.shape
 
         # Ensure grain_size is positive to avoid division by zero
         grain_size = max(0.1, grain_size)
 
         # Determine noise dimensions based on grain_size.
-        # A larger grain_size results in lower-resolution noise, which is then upscaled.
         noise_height = max(1, int(original_height / grain_size))
         noise_width = max(1, int(original_width / grain_size))
 
-        rng = np.random.default_rng(seed)
-        images_with_noise = []
-        for i in range(batch_size):
-            img_np = image[i].cpu().numpy()
+        # Use a PyTorch generator for deterministic noise on the specific device
+        generator = torch.Generator(device=device).manual_seed(seed)
 
-            # Generate noise map
-            if monochrome:
-                # Generate single-channel noise and replicate it across all channels for grayscale grain
-                noise_map_small = rng.standard_normal(
-                    size=(noise_height, noise_width, 1)
-                )
-            else:
-                # Generate independent noise for each channel for color grain
-                noise_map_small = rng.standard_normal(
-                    size=(noise_height, noise_width, num_channels)
-                )
+        # Generate noise map (B, C, H, W) for PyTorch operations
+        if monochrome:
+            noise_map_small = torch.randn(
+                (batch_size, 1, noise_height, noise_width),
+                generator=generator,
+                device=device,
+            )
+        else:
+            noise_map_small = torch.randn(
+                (batch_size, num_channels, noise_height, noise_width),
+                generator=generator,
+                device=device,
+            )
 
-            # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
-            if grain_size != 1.0 and grain_size >= 1:
-                # Use np.kron for a fast nearest-neighbor style upscale
-                noise_map_resized = np.kron(
-                    noise_map_small, np.ones((int(grain_size), int(grain_size), 1))
-                )
-            else:
-                noise_map_resized = noise_map_small
+        # Upscale noise to match image dimensions
+        # Use nearest-neighbor to maintain the blocky grain appearance
+        noise_map_full = torch.nn.functional.interpolate(
+            noise_map_small,
+            size=(original_height, original_width),
+            mode="nearest-exact" if grain_size >= 1.0 else "bilinear",
+        )
 
-            # Trim the upscaled noise map to the exact original image dimensions
-            noise_map_full = noise_map_resized[:original_height, :original_width, :]
+        # If monochrome and image has multiple channels, replicate noise across channels
+        if monochrome and num_channels > 1:
+            noise_map_full = noise_map_full.repeat(1, num_channels, 1, 1)
 
-            # Ensure the noise map has the correct number of channels
-            if num_channels > 1 and noise_map_full.shape[2] == 1 and monochrome:
-                noise_map_full = np.repeat(noise_map_full, num_channels, axis=2)
-            elif noise_map_full.shape[2] != num_channels:
-                # Fallback to ensure channel count matches
-                noise_map_full = np.repeat(
-                    noise_map_full[:, :, 0:1], num_channels, axis=2
-                )
+        # Reorder to (B, H, W, C) to match input image format
+        noise_map_full = noise_map_full.permute(0, 2, 3, 1)
 
-            # Calibrate and apply noise
-            # Center the noise distribution and scale by intensity
-            calibrated_noise = (noise_map_full - np.mean(noise_map_full)) * intensity
-            noisy_img_np = np.clip(img_np + calibrated_noise, 0.0, 1.0)
+        # Calibrate and apply noise
+        # Subtract mean per image to center the noise distribution and scale by intensity
+        # Use keepdim=True for proper broadcasting
+        noise_mean = noise_map_full.mean(dim=(1, 2, 3), keepdim=True)
+        calibrated_noise = (noise_map_full - noise_mean) * intensity
 
-            images_with_noise.append(torch.from_numpy(noisy_img_np).float().cpu())
+        noisy_image = torch.clamp(image + calibrated_noise, 0.0, 1.0)
 
-        return (torch.stack(images_with_noise),)
+        return (noisy_image,)
 
 
 class ClearGpuMemoryCache:
@@ -342,7 +338,7 @@ class ImageMergeNode:
                 borderValue=(0, 0, 0, 0),
             )
 
-            print(f"ImageMergeNode: Aligned image with perspective transformation.")
+            print("ImageMergeNode: Aligned image with perspective transformation.")
             return aligned_updated_cv2
 
         except Exception as e:
@@ -420,7 +416,7 @@ class ImageMergeNode:
                     original_landmarks = original_landmarks_list[best_match_idx]
 
                     print(
-                        f"ImageMergeNode: Warping face {i+1} in updated to match face {best_match_idx+1} in original."
+                        f"ImageMergeNode: Warping face {i + 1} in updated to match face {best_match_idx + 1} in original."
                     )
 
                     # Ensure we have enough landmarks for the detailed set
