@@ -860,36 +860,34 @@ class UpscaleImageToTotalPixels:
 
         m = make_divisible_by
         if m > 1:
-            w, h = adjustable_width, adjustable_height
+            # Canvas dimensions: smallest multiple of m that fits the content
+            canvas_width = ((adjustable_width + m - 1) // m) * m
+            canvas_height = ((adjustable_height + m - 1) // m) * m
 
-            def ceil_m(val, mult):
-                return (val + mult - 1) // mult * mult
+            # --- Step 3: Resize content to AR-preserving dimensions ---
+            if adjustable_width != current_width or adjustable_height != current_height:
+                samples = comfy.utils.common_upscale(
+                    samples, adjustable_width, adjustable_height, rescale_method, "disabled"
+                )
 
-            def floor_m(val, mult):
-                return (val // mult) * mult
+            # --- Step 4: Pad to canvas if needed ---
+            if canvas_width != adjustable_width or canvas_height != adjustable_height:
+                import torch
+                b, c, h, w = samples.shape
+                canvas = torch.zeros(
+                    (b, c, canvas_height, canvas_width),
+                    dtype=samples.dtype,
+                    device=samples.device,
+                )
+                pad_top = (canvas_height - h) // 2
+                pad_left = (canvas_width - w) // 2
+                canvas[:, :, pad_top : pad_top + h, pad_left : pad_left + w] = samples
+                samples = canvas
 
-            w_rem = w % m
-            h_rem = h % m
+            samples = samples.movedim(1, -1)
+            return (samples,)
 
-            if not (w_rem == 0 and h_rem == 0):
-                # Candidate 1: one dimension up, one down
-                if w_rem > h_rem or (w_rem == h_rem and w >= h):
-                    cand_w = ceil_m(w, m)
-                    cand_h = floor_m(h, m)
-                else:
-                    cand_h = ceil_m(h, m)
-                    cand_w = floor_m(w, m)
-
-                # Check if candidate 1 meets the minimum pixel requirement
-                if cand_w * cand_h >= target_pixels:
-                    final_width = cand_w
-                    final_height = cand_h
-                else:
-                    # Candidate 2: both dimensions up
-                    final_width = ceil_m(w, m)
-                    final_height = ceil_m(h, m)
-
-        # --- Step 3: Final Resize ---
+        # --- Step 3: Final Resize (make_divisible_by == 1, unchanged behavior) ---
         if final_width != current_width or final_height != current_height:
             samples = comfy.utils.common_upscale(
                 samples, final_width, final_height, rescale_method, "disabled"
