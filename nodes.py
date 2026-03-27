@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import gc
 import cv2
-import mediapipe as mp
 import itertools
 import comfy.model_management
 import comfy.utils
@@ -43,6 +42,7 @@ class AnalogFilmNoiseNode:
                     {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1},
                 ),
                 "monochrome": ("BOOLEAN", {"default": True}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
             },
         }
 
@@ -52,8 +52,17 @@ class AnalogFilmNoiseNode:
     CATEGORY = "Image/Effects"
     OUTPUT_NODE = False
 
+    @classmethod
+    def IS_CHANGED(cls, image, intensity, grain_size, monochrome, seed):
+        return seed
+
     def apply_film_noise(
-        self, image: torch.Tensor, intensity: float, grain_size: float, monochrome: bool
+        self,
+        image: torch.Tensor,
+        intensity: float,
+        grain_size: float,
+        monochrome: bool,
+        seed: int,
     ):
         """
         Adds film grain to the input image.
@@ -80,6 +89,7 @@ class AnalogFilmNoiseNode:
         noise_height = max(1, int(original_height / grain_size))
         noise_width = max(1, int(original_width / grain_size))
 
+        rng = np.random.default_rng(seed)
         images_with_noise = []
         for i in range(batch_size):
             img_np = image[i].cpu().numpy()
@@ -87,13 +97,13 @@ class AnalogFilmNoiseNode:
             # Generate noise map
             if monochrome:
                 # Generate single-channel noise and replicate it across all channels for grayscale grain
-                noise_map_small = np.random.normal(
-                    loc=0.0, scale=1.0, size=(noise_height, noise_width, 1)
+                noise_map_small = rng.standard_normal(
+                    size=(noise_height, noise_width, 1)
                 )
             else:
                 # Generate independent noise for each channel for color grain
-                noise_map_small = np.random.normal(
-                    loc=0.0, scale=1.0, size=(noise_height, noise_width, num_channels)
+                noise_map_small = rng.standard_normal(
+                    size=(noise_height, noise_width, num_channels)
                 )
 
             # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
@@ -356,6 +366,8 @@ class ImageMergeNode:
     def _find_and_warp_faces(self, original_cv2, updated_cv2):
         """Finds and warps faces from the updated image to match the original image."""
         try:
+            import mediapipe as mp
+
             mp_face_mesh = mp.solutions.face_mesh
             with mp_face_mesh.FaceMesh(
                 static_image_mode=True, max_num_faces=10, min_detection_confidence=0.5
@@ -816,7 +828,7 @@ class UpscaleImageToTotalPixels:
         original_width = samples.shape[3]
         original_height = samples.shape[2]
 
-        target_pixels = total_megapixels * 1000000
+        target_pixels = total_megapixels * 1024 * 1024
         current_pixels = original_width * original_height
 
         # --- Step 1: Initial Upscale (if necessary) ---
@@ -848,36 +860,34 @@ class UpscaleImageToTotalPixels:
 
         m = make_divisible_by
         if m > 1:
-            w, h = adjustable_width, adjustable_height
+            # Canvas dimensions: smallest multiple of m that fits the content
+            canvas_width = ((adjustable_width + m - 1) // m) * m
+            canvas_height = ((adjustable_height + m - 1) // m) * m
 
-            def ceil_m(val, mult):
-                return (val + mult - 1) // mult * mult
+            # --- Step 3: Resize content to AR-preserving dimensions ---
+            if adjustable_width != current_width or adjustable_height != current_height:
+                samples = comfy.utils.common_upscale(
+                    samples, adjustable_width, adjustable_height, rescale_method, "disabled"
+                )
 
-            def floor_m(val, mult):
-                return (val // mult) * mult
+            # --- Step 4: Pad to canvas if needed ---
+            if canvas_width != adjustable_width or canvas_height != adjustable_height:
+                import torch
+                b, c, h, w = samples.shape
+                canvas = torch.zeros(
+                    (b, c, canvas_height, canvas_width),
+                    dtype=samples.dtype,
+                    device=samples.device,
+                )
+                pad_top = (canvas_height - h) // 2
+                pad_left = (canvas_width - w) // 2
+                canvas[:, :, pad_top : pad_top + h, pad_left : pad_left + w] = samples
+                samples = canvas
 
-            w_rem = w % m
-            h_rem = h % m
+            samples = samples.movedim(1, -1)
+            return (samples,)
 
-            if not (w_rem == 0 and h_rem == 0):
-                # Candidate 1: one dimension up, one down
-                if w_rem > h_rem or (w_rem == h_rem and w >= h):
-                    cand_w = ceil_m(w, m)
-                    cand_h = floor_m(h, m)
-                else:
-                    cand_h = ceil_m(h, m)
-                    cand_w = floor_m(w, m)
-
-                # Check if candidate 1 meets the minimum pixel requirement
-                if cand_w * cand_h >= target_pixels:
-                    final_width = cand_w
-                    final_height = cand_h
-                else:
-                    # Candidate 2: both dimensions up
-                    final_width = ceil_m(w, m)
-                    final_height = ceil_m(h, m)
-
-        # --- Step 3: Final Resize ---
+        # --- Step 3: Final Resize (make_divisible_by == 1, unchanged behavior) ---
         if final_width != current_width or final_height != current_height:
             samples = comfy.utils.common_upscale(
                 samples, final_width, final_height, rescale_method, "disabled"
