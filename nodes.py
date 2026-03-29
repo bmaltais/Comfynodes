@@ -54,7 +54,7 @@ class AnalogFilmNoiseNode:
 
     @classmethod
     def IS_CHANGED(cls, image, intensity, grain_size, monochrome, seed):
-        return seed
+        return (seed, intensity, grain_size, monochrome)
 
     def apply_film_noise(
         self,
@@ -106,17 +106,22 @@ class AnalogFilmNoiseNode:
                     size=(noise_height, noise_width, num_channels)
                 )
 
-            # Upscale noise to match image dimensions using nearest-neighbor to maintain the blocky grain appearance
-            if grain_size != 1.0 and grain_size >= 1:
-                # Use np.kron for a fast nearest-neighbor style upscale
-                noise_map_resized = np.kron(
-                    noise_map_small, np.ones((int(grain_size), int(grain_size), 1))
+            # Upscale noise to match image dimensions using cv2.resize so arbitrary
+            # float grain_size values are handled correctly (no dead-zone rows/cols).
+            if noise_map_small.shape[2] == 1:
+                # cv2.resize drops the channel dim for single-channel arrays; handle explicitly
+                noise_map_resized = cv2.resize(
+                    noise_map_small[:, :, 0],
+                    (original_width, original_height),
+                    interpolation=cv2.INTER_LINEAR,
                 )
+                noise_map_full = noise_map_resized[:, :, np.newaxis]
             else:
-                noise_map_resized = noise_map_small
-
-            # Trim the upscaled noise map to the exact original image dimensions
-            noise_map_full = noise_map_resized[:original_height, :original_width, :]
+                noise_map_full = cv2.resize(
+                    noise_map_small,
+                    (original_width, original_height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
 
             # Ensure the noise map has the correct number of channels
             if num_channels > 1 and noise_map_full.shape[2] == 1 and monochrome:
@@ -755,13 +760,10 @@ class LatentByMegapixelsAndAspectRatio:
         actual_megapixels = (width * height) / (1024 * 1024)
         ui_text = f"{width}x{height} ({actual_megapixels:.2f}MP) -> Target: {target_width}x{target_height}"
 
-        return (
-            {"samples": latent, "ui": {"text": ui_text}},
-            width,
-            height,
-            target_width,
-            target_height,
-        )
+        return {
+            "ui": {"text": [ui_text]},
+            "result": ({"samples": latent}, width, height, target_width, target_height),
+        }
 
 
 class UpscaleImageToTotalPixels:
@@ -867,12 +869,17 @@ class UpscaleImageToTotalPixels:
             # --- Step 3: Resize content to AR-preserving dimensions ---
             if adjustable_width != current_width or adjustable_height != current_height:
                 samples = comfy.utils.common_upscale(
-                    samples, adjustable_width, adjustable_height, rescale_method, "disabled"
+                    samples,
+                    adjustable_width,
+                    adjustable_height,
+                    rescale_method,
+                    "disabled",
                 )
 
             # --- Step 4: Pad to canvas if needed ---
             if canvas_width != adjustable_width or canvas_height != adjustable_height:
                 import torch
+
                 b, c, h, w = samples.shape
                 canvas = torch.zeros(
                     (b, c, canvas_height, canvas_width),
