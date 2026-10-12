@@ -867,12 +867,17 @@ class UpscaleImageToTotalPixels:
             # --- Step 3: Resize content to AR-preserving dimensions ---
             if adjustable_width != current_width or adjustable_height != current_height:
                 samples = comfy.utils.common_upscale(
-                    samples, adjustable_width, adjustable_height, rescale_method, "disabled"
+                    samples,
+                    adjustable_width,
+                    adjustable_height,
+                    rescale_method,
+                    "disabled",
                 )
 
             # --- Step 4: Pad to canvas if needed ---
             if canvas_width != adjustable_width or canvas_height != adjustable_height:
                 import torch
+
                 b, c, h, w = samples.shape
                 canvas = torch.zeros(
                     (b, c, canvas_height, canvas_width),
@@ -897,12 +902,122 @@ class UpscaleImageToTotalPixels:
         return (samples,)
 
 
+class SaveImageJPG:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "output_folder": ("STRING", {"default": "", "multiline": False}),
+                "filename_prefix": ("STRING", {"default": "image"}),
+                "quality": ("INT", {"default": 95, "min": 1, "max": 100, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("txt_path",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "image"
+
+    def save(self, images, output_folder, filename_prefix, quality):
+        import os
+        import re
+        from PIL import Image
+
+        folder = os.path.abspath(os.path.expanduser(output_folder.strip()))
+        if not output_folder.strip():
+            raise ValueError("SaveImageJPG: output_folder is empty")
+        os.makedirs(folder, exist_ok=True)
+
+        # Strip path separators so the prefix cannot escape the folder
+        prefix = os.path.basename(filename_prefix.strip()) or "image"
+
+        # Continue numbering after the highest existing <prefix>_NNNNN.jpg
+        pattern = re.compile(r"^" + re.escape(prefix) + r"_(\d+)\.jpg$", re.IGNORECASE)
+        counter = 0
+        for name in os.listdir(folder):
+            m = pattern.match(name)
+            if m:
+                counter = max(counter, int(m.group(1)))
+
+        saved = []
+        txt_paths = []
+        for image in images:
+            counter += 1
+            np_img = np.clip(image.cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+            if np_img.shape[-1] == 4:  # JPEG has no alpha
+                np_img = np_img[..., :3]
+            path = os.path.join(folder, f"{prefix}_{counter:05d}.jpg")
+            Image.fromarray(np_img).save(path, format="JPEG", quality=quality)
+            saved.append(path)
+            txt_paths.append(os.path.splitext(path)[0] + ".txt")
+
+        print(f"[SaveImageJPG] saved {len(saved)} image(s) to {folder}")
+        return {"ui": {"text": saved}, "result": (txt_paths,)}
+
+
+class SaveTextFile:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "txt_path": ("STRING", {"forceInput": True}),
+                "output_folder": ("STRING", {"default": ""}),
+                "filename_prefix": ("STRING", {"default": "text"}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = "text"
+
+    def save(self, text, txt_path=None, output_folder="", filename_prefix="text"):
+        import os
+        import re
+
+        if txt_path and txt_path.strip():
+            # Path from Save Image JPG: same name as the image, .txt extension
+            path = os.path.abspath(os.path.expanduser(txt_path.strip()))
+            path = os.path.splitext(path)[0] + ".txt"
+            folder = os.path.dirname(path)
+        else:
+            if not output_folder.strip():
+                raise ValueError("SaveTextFile: connect txt_path or set output_folder")
+            folder = os.path.abspath(os.path.expanduser(output_folder.strip()))
+            prefix = os.path.basename(filename_prefix.strip()) or "text"
+            pattern = re.compile(
+                r"^" + re.escape(prefix) + r"_(\d+)\.txt$", re.IGNORECASE
+            )
+            counter = 0
+            if os.path.isdir(folder):
+                for name in os.listdir(folder):
+                    m = pattern.match(name)
+                    if m:
+                        counter = max(counter, int(m.group(1)))
+            path = os.path.join(folder, f"{prefix}_{counter + 1:05d}.txt")
+
+        os.makedirs(folder, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        print(f"[SaveTextFile] saved {path}")
+        return {"ui": {"text": [path]}}
+
+
 NODE_CLASS_MAPPINGS = {
     "AnalogFilmNoiseNode": AnalogFilmNoiseNode,
     "ClearGpuMemoryCache": ClearGpuMemoryCache,
     "ImageMergeNode": ImageMergeNode,
     "LatentByMegapixelsAndAspectRatio": LatentByMegapixelsAndAspectRatio,
     "UpscaleImageToTotalPixels": UpscaleImageToTotalPixels,
+    "SaveImageJPG": SaveImageJPG,
+    "SaveTextFile": SaveTextFile,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -911,4 +1026,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageMergeNode": "Image Merge (Align & Blend)",
     "LatentByMegapixelsAndAspectRatio": "Latent by Megapixels & Aspect Ratio",
     "UpscaleImageToTotalPixels": "🚀 Upscale Image to Total Pixels",
+    "SaveImageJPG": "💾 Save Image JPG (External Folder)",
+    "SaveTextFile": "📝 Save Text File",
 }
